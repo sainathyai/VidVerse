@@ -1,0 +1,1307 @@
+# AI Video Generation Pipeline - Cursor Rules
+
+## Project Context
+This is an AI-powered video generation pipeline with agentic capabilities using LangGraph. The system creates professional-quality videos from prompts, with support for music videos and ad creatives. Users can upload assets, control scene frames, and iterate via chat-based editing.
+
+## Core Technologies
+- **Frontend**: Next.js 15 (App Router), React 18, TypeScript, Tailwind CSS v4
+- **Backend**: Node.js 20 / Python 3.11, Fastify / FastAPI, LangGraph
+- **AI/ML**: Replicate API (Runway, Pika, Luma, Suno), OpenAI GPT-4o, LangChain
+- **Database**: PostgreSQL (Supabase), Redis (Upstash), S3/R2 (storage)
+- **Media**: FFmpeg, Librosa, Sharp/Pillow
+- **Monitoring**: OpenTelemetry, Datadog, Sentry
+
+---
+
+## 1. Code Style & Standards
+
+### TypeScript/JavaScript
+- Use TypeScript strict mode with explicit types
+- Prefer `const` over `let`, never use `var`
+- Use async/await over promises chains
+- Use optional chaining (`?.`) and nullish coalescing (`??`)
+- Functional programming patterns preferred (map, filter, reduce)
+- No any types - use unknown and type guards instead
+- Use Zod for runtime validation and type inference
+
+```typescript
+// Good
+const result = await fetchData().catch(err => handleError(err));
+const value = data?.nested?.property ?? 'default';
+
+// Bad
+let result;
+fetchData().then(data => { result = data; });
+const value = data && data.nested && data.nested.property || 'default';
+```
+
+### Python
+- Use type hints for all function signatures
+- Follow PEP 8 style guide
+- Use Pydantic models for data validation
+- Async/await for I/O operations
+- List comprehensions over loops when readable
+- Context managers for resources (with statements)
+
+```python
+# Good
+async def generate_video(prompt: str, config: VideoConfig) -> VideoResult:
+    async with httpx.AsyncClient() as client:
+        result = await client.post(url, json=config.dict())
+    return VideoResult(**result.json())
+
+# Bad
+def generate_video(prompt, config):
+    client = httpx.Client()
+    result = client.post(url, json=config)
+    client.close()
+    return result.json()
+```
+
+### File Naming
+- React components: PascalCase (e.g., `SceneBoard.tsx`)
+- Utilities/hooks: camelCase (e.g., `useSceneEditor.ts`)
+- Constants: UPPER_SNAKE_CASE (e.g., `API_ENDPOINTS.ts`)
+- Types/interfaces: PascalCase (e.g., `VideoConfig.ts`)
+
+---
+
+## 2. Frontend Architecture
+
+### Next.js 15 App Router
+- Use Server Components by default, Client Components only when needed
+- Mark client components with 'use client' directive at top
+- Leverage Server Actions for mutations
+- Use loading.tsx and error.tsx for better UX
+- Implement proper metadata for SEO
+
+```typescript
+// app/project/[id]/page.tsx (Server Component)
+import { ProjectView } from '@/components/ProjectView';
+
+export default async function ProjectPage({ params }: { params: { id: string } }) {
+  const project = await getProject(params.id); // Server-side fetch
+  return <ProjectView project={project} />;
+}
+
+// components/ProjectView.tsx (Client Component)
+'use client';
+import { useState } from 'react';
+
+export function ProjectView({ project }: { project: Project }) {
+  const [isEditing, setIsEditing] = useState(false);
+  // Interactive UI logic
+}
+```
+
+### React Best Practices
+- Use hooks correctly (rules of hooks)
+- Extract custom hooks for reusable logic
+- Memoize expensive computations with useMemo
+- Use useCallback for stable function references
+- Implement error boundaries for resilience
+- Use Suspense for code splitting
+
+```typescript
+// Custom hook example
+function useSceneEditor(projectId: string) {
+  const [scenes, setScenes] = useState<Scene[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const updateScene = useCallback(async (sceneId: string, updates: Partial<Scene>) => {
+    setIsLoading(true);
+    try {
+      const updated = await api.scenes.update(sceneId, updates);
+      setScenes(prev => prev.map(s => s.id === sceneId ? updated : s));
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  return { scenes, isLoading, updateScene };
+}
+```
+
+### State Management
+- **Server state**: TanStack Query (React Query)
+- **Client state**: Zustand (lightweight stores)
+- **Form state**: React Hook Form + Zod
+- **URL state**: Next.js searchParams for filters/pagination
+
+```typescript
+// Zustand store
+import { create } from 'zustand';
+
+interface UIStore {
+  sidebarOpen: boolean;
+  agenticMode: boolean;
+  toggleSidebar: () => void;
+  setAgenticMode: (mode: boolean) => void;
+}
+
+export const useUIStore = create<UIStore>((set) => ({
+  sidebarOpen: true,
+  agenticMode: false,
+  toggleSidebar: () => set(state => ({ sidebarOpen: !state.sidebarOpen })),
+  setAgenticMode: (mode) => set({ agenticMode: mode }),
+}));
+
+// React Query
+import { useQuery, useMutation } from '@tanstack/react-query';
+
+function useProject(id: string) {
+  return useQuery({
+    queryKey: ['project', id],
+    queryFn: () => api.projects.get(id),
+    staleTime: 5 * 60 * 1000, // 5 minutes
+  });
+}
+```
+
+---
+
+## 3. Modern UI/UX Design Principles
+
+### Design System Foundation
+- **Color Palette**: Use HSL for better color manipulation
+  - Primary: `hsl(215, 100%, 50%)` - Vibrant blue
+  - Secondary: `hsl(280, 90%, 60%)` - Purple accent
+  - Success: `hsl(142, 76%, 36%)` - Green
+  - Danger: `hsl(0, 84%, 60%)` - Red
+  - Neutral: `hsl(222, 47%, 11%)` - Dark background
+  - Surface: `hsl(222, 47%, 14%)` - Card background
+  - Text: `hsl(210, 40%, 98%)` - Primary text
+  - Muted: `hsl(215, 20%, 65%)` - Secondary text
+
+- **Typography Scale**: Use fluid typography
+  - Headings: Inter Variable (700-900 weight)
+  - Body: Inter Variable (400-600 weight)
+  - Code: Geist Mono
+  - Scale: 12px, 14px, 16px, 20px, 24px, 32px, 48px, 64px
+
+- **Spacing Scale**: Consistent spacing (4px base unit)
+  - xs: 4px, sm: 8px, md: 16px, lg: 24px, xl: 32px, 2xl: 48px, 3xl: 64px
+
+- **Border Radius**: Smooth, modern curves
+  - sm: 6px, md: 10px, lg: 16px, xl: 24px, full: 9999px
+
+- **Shadows**: Layered elevation
+  - sm: `0 1px 2px rgba(0,0,0,0.05)`
+  - md: `0 4px 6px rgba(0,0,0,0.1), 0 2px 4px rgba(0,0,0,0.06)`
+  - lg: `0 10px 15px rgba(0,0,0,0.1), 0 4px 6px rgba(0,0,0,0.05)`
+  - xl: `0 20px 25px rgba(0,0,0,0.15), 0 8px 10px rgba(0,0,0,0.08)`
+  - glow: `0 0 20px rgba(59, 130, 246, 0.5)` (for interactive elements)
+
+### Tailwind Configuration
+```typescript
+// tailwind.config.ts
+import type { Config } from 'tailwindcss';
+
+const config: Config = {
+  content: ['./app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}'],
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        primary: {
+          50: 'hsl(215, 100%, 97%)',
+          100: 'hsl(215, 100%, 94%)',
+          500: 'hsl(215, 100%, 50%)',
+          600: 'hsl(215, 100%, 45%)',
+          900: 'hsl(215, 100%, 20%)',
+        },
+        surface: {
+          DEFAULT: 'hsl(222, 47%, 14%)',
+          hover: 'hsl(222, 47%, 18%)',
+          active: 'hsl(222, 47%, 22%)',
+        },
+      },
+      fontFamily: {
+        sans: ['var(--font-inter)', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-geist-mono)', 'monospace'],
+      },
+      animation: {
+        'fade-in': 'fadeIn 0.3s ease-in-out',
+        'slide-up': 'slideUp 0.4s ease-out',
+        'slide-down': 'slideDown 0.4s ease-out',
+        'scale-in': 'scaleIn 0.2s ease-out',
+        'shimmer': 'shimmer 2s infinite',
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+      },
+      keyframes: {
+        fadeIn: {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
+        slideUp: {
+          '0%': { transform: 'translateY(20px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        },
+        slideDown: {
+          '0%': { transform: 'translateY(-20px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        },
+        scaleIn: {
+          '0%': { transform: 'scale(0.95)', opacity: '0' },
+          '100%': { transform: 'scale(1)', opacity: '1' },
+        },
+        shimmer: {
+          '0%': { backgroundPosition: '-1000px 0' },
+          '100%': { backgroundPosition: '1000px 0' },
+        },
+      },
+      backdropBlur: {
+        xs: '2px',
+      },
+    },
+  },
+  plugins: [
+    require('@tailwindcss/forms'),
+    require('@tailwindcss/typography'),
+  ],
+};
+
+export default config;
+```
+
+### Component Design Patterns
+
+#### Glass Morphism Cards
+```typescript
+// components/ui/Card.tsx
+interface CardProps {
+  children: React.ReactNode;
+  className?: string;
+  glow?: boolean;
+}
+
+export function Card({ children, className = '', glow = false }: CardProps) {
+  return (
+    <div
+      className={`
+        relative rounded-xl border border-white/10
+        bg-surface/60 backdrop-blur-xl
+        shadow-lg hover:shadow-xl
+        transition-all duration-300
+        ${glow ? 'hover:shadow-primary-500/20 hover:border-primary-500/30' : ''}
+        ${className}
+      `}
+    >
+      {glow && (
+        <div className="absolute inset-0 -z-10 rounded-xl bg-gradient-to-br from-primary-500/20 to-transparent opacity-0 blur-xl transition-opacity duration-300 group-hover:opacity-100" />
+      )}
+      {children}
+    </div>
+  );
+}
+```
+
+#### Animated Buttons
+```typescript
+// components/ui/Button.tsx
+interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
+  size?: 'sm' | 'md' | 'lg';
+  loading?: boolean;
+  icon?: React.ReactNode;
+}
+
+export function Button({
+  children,
+  variant = 'primary',
+  size = 'md',
+  loading = false,
+  icon,
+  className = '',
+  disabled,
+  ...props
+}: ButtonProps) {
+  const baseStyles = 'relative inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed';
+  
+  const variants = {
+    primary: 'bg-gradient-to-r from-primary-500 to-primary-600 text-white shadow-lg shadow-primary-500/30 hover:shadow-xl hover:shadow-primary-500/40 hover:scale-105 active:scale-100',
+    secondary: 'bg-surface border border-white/10 text-white hover:bg-surface-hover hover:border-white/20',
+    ghost: 'text-white hover:bg-white/5',
+    danger: 'bg-red-500 text-white hover:bg-red-600 shadow-lg shadow-red-500/30',
+  };
+  
+  const sizes = {
+    sm: 'px-3 py-1.5 text-sm',
+    md: 'px-4 py-2 text-base',
+    lg: 'px-6 py-3 text-lg',
+  };
+
+  return (
+    <button
+      className={`${baseStyles} ${variants[variant]} ${sizes[size]} ${className}`}
+      disabled={disabled || loading}
+      {...props}
+    >
+      {loading ? (
+        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+        </svg>
+      ) : icon}
+      {children}
+    </button>
+  );
+}
+```
+
+#### Gradient Text
+```typescript
+// components/ui/GradientText.tsx
+export function GradientText({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return (
+    <span className={`bg-gradient-to-r from-primary-400 via-purple-400 to-pink-400 bg-clip-text text-transparent ${className}`}>
+      {children}
+    </span>
+  );
+}
+
+// Usage
+<h1 className="text-5xl font-bold">
+  Create <GradientText>Amazing</GradientText> Videos with AI
+</h1>
+```
+
+#### Shimmer Loading Effect
+```typescript
+// components/ui/Skeleton.tsx
+export function Skeleton({ className = '' }: { className?: string }) {
+  return (
+    <div
+      className={`animate-shimmer bg-gradient-to-r from-surface via-white/5 to-surface bg-[length:1000px_100%] rounded ${className}`}
+    />
+  );
+}
+
+// Usage
+<div className="space-y-4">
+  <Skeleton className="h-12 w-full" />
+  <Skeleton className="h-32 w-full" />
+  <Skeleton className="h-8 w-2/3" />
+</div>
+```
+
+#### Smooth Transitions
+```typescript
+// Use Framer Motion for advanced animations
+import { motion, AnimatePresence } from 'framer-motion';
+
+export function SceneCard({ scene }: { scene: Scene }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      transition={{ duration: 0.3 }}
+      whileHover={{ y: -4, transition: { duration: 0.2 } }}
+      className="p-6 rounded-xl bg-surface border border-white/10"
+    >
+      {/* Card content */}
+    </motion.div>
+  );
+}
+
+// List with stagger effect
+<motion.div
+  initial="hidden"
+  animate="visible"
+  variants={{
+    visible: {
+      transition: {
+        staggerChildren: 0.1,
+      },
+    },
+  }}
+>
+  {scenes.map((scene) => (
+    <motion.div
+      key={scene.id}
+      variants={{
+        hidden: { opacity: 0, y: 20 },
+        visible: { opacity: 1, y: 0 },
+      }}
+    >
+      <SceneCard scene={scene} />
+    </motion.div>
+  ))}
+</motion.div>
+```
+
+#### Micro-interactions
+```typescript
+// components/ui/IconButton.tsx
+export function IconButton({ icon: Icon, tooltip, ...props }: IconButtonProps) {
+  return (
+    <Tooltip content={tooltip}>
+      <button
+        className="
+          group relative p-2 rounded-lg
+          text-muted hover:text-white
+          hover:bg-white/5
+          transition-all duration-200
+          active:scale-95
+        "
+        {...props}
+      >
+        <Icon className="w-5 h-5 transition-transform duration-200 group-hover:scale-110" />
+        <span className="absolute inset-0 rounded-lg bg-white/0 group-hover:bg-white/10 transition-colors duration-200" />
+      </button>
+    </Tooltip>
+  );
+}
+```
+
+### Layout Patterns
+
+#### Modern Dashboard Layout
+```typescript
+// app/dashboard/layout.tsx
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-neutral-900 via-neutral-800 to-neutral-900">
+      {/* Background effects */}
+      <div className="fixed inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(59,130,246,0.1),transparent_50%)]" />
+      <div className="fixed inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:4rem_4rem]" />
+      
+      <div className="relative z-10">
+        <Sidebar />
+        <main className="ml-64 p-8">
+          <div className="max-w-7xl mx-auto">
+            {children}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
+```
+
+#### Responsive Grid System
+```typescript
+// Use CSS Grid for complex layouts
+<div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+  {projects.map(project => (
+    <ProjectCard key={project.id} project={project} />
+  ))}
+</div>
+
+// Or Flexbox for simpler layouts
+<div className="flex flex-col lg:flex-row gap-6">
+  <aside className="lg:w-64 shrink-0">
+    <Sidebar />
+  </aside>
+  <main className="flex-1 min-w-0">
+    {children}
+  </main>
+</div>
+```
+
+### Accessibility (a11y)
+
+- Always include proper ARIA labels
+- Ensure keyboard navigation works
+- Use semantic HTML elements
+- Maintain sufficient color contrast (WCAG AA: 4.5:1)
+- Provide focus indicators
+- Support screen readers
+
+```typescript
+// Good accessibility
+<button
+  aria-label="Generate video"
+  aria-busy={isGenerating}
+  disabled={isGenerating}
+  className="focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-neutral-900"
+>
+  {isGenerating ? 'Generating...' : 'Generate'}
+</button>
+
+// Form with proper labels
+<label htmlFor="prompt" className="block text-sm font-medium text-white mb-2">
+  Video Prompt
+</label>
+<input
+  id="prompt"
+  type="text"
+  aria-describedby="prompt-help"
+  className="..."
+/>
+<p id="prompt-help" className="text-sm text-muted mt-1">
+  Describe the video you want to create
+</p>
+```
+
+### Performance Optimizations
+
+- Use Next.js Image component for optimized images
+- Implement lazy loading for off-screen content
+- Use React.memo for expensive components
+- Virtualize long lists (react-virtual)
+- Code split with dynamic imports
+- Optimize bundle size (analyze with @next/bundle-analyzer)
+
+```typescript
+// Lazy load heavy components
+import dynamic from 'next/dynamic';
+
+const VideoEditor = dynamic(() => import('@/components/VideoEditor'), {
+  loading: () => <Skeleton className="h-96 w-full" />,
+  ssr: false, // Client-side only
+});
+
+// Optimized images
+import Image from 'next/image';
+
+<Image
+  src={scene.thumbnailUrl}
+  alt={scene.title}
+  width={400}
+  height={225}
+  className="rounded-lg"
+  placeholder="blur"
+  blurDataURL={scene.blurHash}
+/>
+
+// Virtualized list
+import { useVirtualizer } from '@tanstack/react-virtual';
+
+function SceneList({ scenes }: { scenes: Scene[] }) {
+  const parentRef = React.useRef<HTMLDivElement>(null);
+  
+  const virtualizer = useVirtualizer({
+    count: scenes.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 200,
+  });
+
+  return (
+    <div ref={parentRef} className="h-[600px] overflow-auto">
+      <div style={{ height: `${virtualizer.getTotalSize()}px` }}>
+        {virtualizer.getVirtualItems().map((item) => (
+          <div key={item.key} style={{ transform: `translateY(${item.start}px)` }}>
+            <SceneCard scene={scenes[item.index]} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## 4. Backend Architecture
+
+### API Design
+- RESTful principles with proper HTTP verbs
+- Consistent error responses
+- Request validation with Zod/Pydantic
+- Rate limiting per endpoint
+- API versioning (/api/v1/)
+- OpenAPI/Swagger documentation
+
+```typescript
+// Fastify route example
+import { z } from 'zod';
+
+const CreateProjectSchema = z.object({
+  prompt: z.string().min(10).max(1000),
+  category: z.enum(['music_video', 'ad_creative']),
+  mode: z.enum(['classic', 'agentic']).default('classic'),
+  assets: z.array(z.object({
+    type: z.enum(['audio', 'image', 'video', 'brand_kit']),
+    url: z.string().url(),
+  })).optional(),
+});
+
+fastify.post('/api/projects', {
+  schema: {
+    body: CreateProjectSchema,
+    response: {
+      201: ProjectSchema,
+    },
+  },
+  preHandler: [authenticateUser, rateLimitMiddleware],
+}, async (request, reply) => {
+  const data = request.body;
+  const project = await createProject(request.user.id, data);
+  return reply.code(201).send(project);
+});
+```
+
+### Error Handling
+- Use custom error classes
+- Consistent error format
+- Log errors with context
+- Never expose internal errors to clients
+
+```typescript
+// errors.ts
+export class AppError extends Error {
+  constructor(
+    public statusCode: number,
+    public message: string,
+    public code: string,
+    public details?: unknown,
+  ) {
+    super(message);
+    this.name = 'AppError';
+  }
+}
+
+export class ValidationError extends AppError {
+  constructor(details: unknown) {
+    super(400, 'Validation failed', 'VALIDATION_ERROR', details);
+  }
+}
+
+// Error handler middleware
+fastify.setErrorHandler((error, request, reply) => {
+  if (error instanceof AppError) {
+    return reply.code(error.statusCode).send({
+      error: {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+      },
+    });
+  }
+
+  // Log unexpected errors
+  logger.error({ err: error, req: request }, 'Unexpected error');
+
+  return reply.code(500).send({
+    error: {
+      code: 'INTERNAL_ERROR',
+      message: 'An unexpected error occurred',
+    },
+  });
+});
+```
+
+### Database Patterns
+- Use transactions for multi-step operations
+- Implement soft deletes where appropriate
+- Index foreign keys and frequent query columns
+- Use connection pooling
+- Implement optimistic locking for concurrent updates
+
+```typescript
+// Using Prisma
+async function updateProject(projectId: string, updates: ProjectUpdate) {
+  return await prisma.$transaction(async (tx) => {
+    // Check version for optimistic locking
+    const current = await tx.project.findUnique({
+      where: { id: projectId },
+      select: { version: true },
+    });
+
+    if (current.version !== updates.version) {
+      throw new ConflictError('Project was modified by another user');
+    }
+
+    // Update project and increment version
+    const updated = await tx.project.update({
+      where: { id: projectId },
+      data: {
+        ...updates,
+        version: { increment: 1 },
+        updatedAt: new Date(),
+      },
+    });
+
+    // Log change
+    await tx.auditLog.create({
+      data: {
+        projectId,
+        action: 'UPDATE',
+        changes: updates,
+      },
+    });
+
+    return updated;
+  });
+}
+```
+
+### Job Queue Patterns
+- Idempotent job handlers (safe to retry)
+- Exponential backoff for retries
+- Dead letter queue for failed jobs
+- Job progress tracking
+- Priority queues for urgent tasks
+
+```typescript
+// BullMQ job processor
+import { Worker, Job } from 'bullmq';
+
+const worker = new Worker('video-generation', async (job: Job) => {
+  const { projectId, mode } = job.data;
+
+  try {
+    // Update progress
+    await job.updateProgress(10);
+
+    // Execute pipeline
+    if (mode === 'agentic') {
+      await executeAgenticPipeline(projectId, {
+        onProgress: (progress) => job.updateProgress(progress),
+      });
+    } else {
+      await executeClassicPipeline(projectId, {
+        onProgress: (progress) => job.updateProgress(progress),
+      });
+    }
+
+    await job.updateProgress(100);
+
+    return { success: true, projectId };
+  } catch (error) {
+    logger.error({ err: error, jobId: job.id }, 'Job failed');
+    throw error; // Will trigger retry
+  }
+}, {
+  connection: redisConnection,
+  concurrency: 3,
+  limiter: {
+    max: 10, // Max 10 jobs per minute
+    duration: 60000,
+  },
+});
+
+worker.on('failed', async (job, error) => {
+  // Notify user of failure
+  await notifyUser(job.data.userId, {
+    type: 'generation_failed',
+    projectId: job.data.projectId,
+    error: error.message,
+  });
+});
+```
+
+---
+
+## 5. LangGraph Agentic Patterns
+
+### Graph Structure
+- Keep state minimal and serializable
+- Use conditional edges for branching logic
+- Implement checkpoints for resumability
+- Add human-in-the-loop nodes
+- Set maximum iteration limits
+
+```python
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, Annotated
+import operator
+
+class VideoState(TypedDict):
+    project_id: str
+    prompt: str
+    scenes: list[dict]
+    feedback: Annotated[list[str], operator.add]  # Accumulate feedback
+    iteration: int
+    max_iterations: int
+
+def should_iterate(state: VideoState) -> str:
+    if state["iteration"] >= state["max_iterations"]:
+        return "finalize"
+    if not state["feedback"]:
+        return "finalize"
+    return "iterate"
+
+graph = StateGraph(VideoState)
+graph.add_node("planner", plan_scenes)
+graph.add_node("generator", generate_assets)
+graph.add_node("critic", critique_quality)
+graph.add_node("human_feedback", wait_for_human)
+graph.add_node("composer", compose_video)
+
+graph.set_entry_point("planner")
+graph.add_edge("planner", "generator")
+graph.add_edge("generator", "critic")
+graph.add_conditional_edges(
+    "critic",
+    should_iterate,
+    {
+        "iterate": "human_feedback",
+        "finalize": "composer",
+    }
+)
+graph.add_edge("human_feedback", "planner")
+graph.add_edge("composer", END)
+
+app = graph.compile()
+```
+
+### Tool Calling
+- Validate tool inputs strictly
+- Implement timeout for long-running tools
+- Cache tool results when possible
+- Provide clear tool descriptions for LLM
+
+```python
+from langchain.tools import tool
+from pydantic import BaseModel, Field
+
+class VideoGenerationInput(BaseModel):
+    prompt: str = Field(description="The scene description")
+    duration: float = Field(description="Duration in seconds", ge=1, le=30)
+    style: str = Field(description="Visual style", default="cinematic")
+
+@tool("generate_video_scene", args_schema=VideoGenerationInput)
+async def generate_video_scene(prompt: str, duration: float, style: str) -> str:
+    """Generate a video scene using Replicate API.
+    
+    This tool creates a short video clip based on the provided prompt.
+    Use it for each scene in the video timeline.
+    """
+    # Check cache first
+    cache_key = f"{prompt}:{duration}:{style}"
+    cached = await redis.get(cache_key)
+    if cached:
+        return cached
+
+    # Call Replicate
+    result = await replicate.run(
+        "runway/gen-3-alpha",
+        input={
+            "prompt": prompt,
+            "duration": duration,
+            "style": style,
+        }
+    )
+
+    # Cache result
+    await redis.setex(cache_key, 86400, result)
+    return result
+```
+
+---
+
+## 6. Testing Strategy
+
+### Unit Tests
+- Test pure functions extensively
+- Mock external dependencies
+- Use descriptive test names
+- Follow AAA pattern (Arrange, Act, Assert)
+
+```typescript
+// __tests__/utils/beatDetection.test.ts
+import { describe, it, expect, vi } from 'vitest';
+import { detectBeats } from '@/utils/beatDetection';
+
+describe('beatDetection', () => {
+  it('should detect beats in a song with 120 BPM', async () => {
+    // Arrange
+    const audioBuffer = await loadTestAudio('120bpm.mp3');
+    
+    // Act
+    const beats = await detectBeats(audioBuffer);
+    
+    // Assert
+    expect(beats).toHaveLength(240); // 120 BPM * 2 minutes
+    expect(beats[0]).toBeCloseTo(0.5, 1); // First beat at ~0.5s
+  });
+
+  it('should handle audio files with no clear beats', async () => {
+    const audioBuffer = await loadTestAudio('ambient.mp3');
+    const beats = await detectBeats(audioBuffer);
+    
+    expect(beats).toHaveLength(0);
+  });
+});
+```
+
+### Integration Tests
+- Test API endpoints end-to-end
+- Use test database
+- Clean up after each test
+- Test error scenarios
+
+```typescript
+// __tests__/api/projects.test.ts
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { createTestServer } from '@/test/helpers';
+
+describe('POST /api/projects', () => {
+  let server: FastifyInstance;
+  let authToken: string;
+
+  beforeEach(async () => {
+    server = await createTestServer();
+    authToken = await createTestUser(server);
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('should create a project with valid data', async () => {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: {
+        prompt: 'Create a cyberpunk music video',
+        category: 'music_video',
+        mode: 'classic',
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({
+      id: expect.any(String),
+      prompt: 'Create a cyberpunk music video',
+      status: 'draft',
+    });
+  });
+
+  it('should reject invalid category', async () => {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: {
+        prompt: 'Test',
+        category: 'invalid_category',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: {
+        code: 'VALIDATION_ERROR',
+      },
+    });
+  });
+});
+```
+
+### E2E Tests
+```typescript
+// e2e/video-generation.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Video Generation Flow', () => {
+  test('user can generate a music video', async ({ page }) => {
+    // Login
+    await page.goto('/login');
+    await page.fill('[name=email]', 'test@example.com');
+    await page.fill('[name=password]', 'password123');
+    await page.click('button[type=submit]');
+
+    // Create project
+    await page.goto('/dashboard');
+    await page.click('text=New Project');
+    await expect(page).toHaveURL(/\/project\/new/);
+
+    // Fill form
+    await page.selectOption('[name=category]', 'music_video');
+    await page.fill('[name=prompt]', 'A cyberpunk music video with neon lights');
+    await page.setInputFiles('[name=audio]', 'fixtures/test-song.mp3');
+
+    // Submit
+    await page.click('text=Generate');
+    await expect(page.locator('[data-testid=generation-status]')).toContainText('Processing');
+
+    // Wait for completion (with timeout)
+    await expect(page.locator('[data-testid=video-player]')).toBeVisible({ timeout: 600000 });
+
+    // Verify video is playable
+    const videoElement = page.locator('video');
+    await expect(videoElement).toHaveAttribute('src', /\.mp4$/);
+  });
+});
+```
+
+---
+
+## 7. Performance & Monitoring
+
+### Logging
+```typescript
+import pino from 'pino';
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  formatters: {
+    level: (label) => ({ level: label }),
+  },
+  timestamp: pino.stdTimeFunctions.isoTime,
+});
+
+// Structured logging
+logger.info({ projectId, userId, duration }, 'Video generation started');
+
+// Error logging with context
+logger.error({ err, projectId, phase: 'scene_generation' }, 'Generation failed');
+```
+
+### Metrics
+```typescript
+// Using Prometheus metrics
+import client from 'prom-client';
+
+const generationDuration = new client.Histogram({
+  name: 'video_generation_duration_seconds',
+  help: 'Video generation duration in seconds',
+  labelNames: ['mode', 'category'],
+  buckets: [30, 60, 120, 300, 600],
+});
+
+const generationCost = new client.Gauge({
+  name: 'video_generation_cost_usd',
+  help: 'Cost per video generation in USD',
+  labelNames: ['mode', 'category'],
+});
+
+// Record metrics
+const timer = generationDuration.startTimer({ mode: 'agentic', category: 'music_video' });
+const cost = await generateVideo(project);
+timer();
+generationCost.set({ mode: 'agentic', category: 'music_video' }, cost);
+```
+
+### Caching Strategy
+```typescript
+// Multi-layer caching
+class CacheService {
+  private memory = new Map<string, { data: unknown; expires: number }>();
+
+  async get<T>(key: string): Promise<T | null> {
+    // L1: Memory cache (fastest)
+    const memCached = this.memory.get(key);
+    if (memCached && memCached.expires > Date.now()) {
+      return memCached.data as T;
+    }
+
+    // L2: Redis cache
+    const redisCached = await redis.get(key);
+    if (redisCached) {
+      const data = JSON.parse(redisCached);
+      this.memory.set(key, { data, expires: Date.now() + 60000 }); // Cache in memory for 1 min
+      return data;
+    }
+
+    return null;
+  }
+
+  async set(key: string, value: unknown, ttl: number): Promise<void> {
+    this.memory.set(key, { data: value, expires: Date.now() + Math.min(ttl * 1000, 60000) });
+    await redis.setex(key, ttl, JSON.stringify(value));
+  }
+}
+```
+
+---
+
+## 8. Security Best Practices
+
+### Input Validation
+- Validate all user inputs
+- Sanitize file uploads
+- Rate limit aggressive
+- Prevent prompt injection in LLM calls
+
+```typescript
+// Sanitize LLM prompts
+function sanitizePrompt(prompt: string): string {
+  // Remove potential system prompt injections
+  return prompt
+    .replace(/\[INST\]|\[\/INST\]/g, '')
+    .replace(/<\|.*?\|>/g, '')
+    .trim()
+    .slice(0, 1000); // Max length
+}
+
+// File upload validation
+const ALLOWED_MIME_TYPES = {
+  audio: ['audio/mpeg', 'audio/wav', 'audio/mp4'],
+  image: ['image/jpeg', 'image/png', 'image/webp'],
+};
+
+async function validateUpload(file: File, type: 'audio' | 'image') {
+  if (!ALLOWED_MIME_TYPES[type].includes(file.type)) {
+    throw new ValidationError('Invalid file type');
+  }
+
+  // Check actual file content (not just extension)
+  const buffer = await file.arrayBuffer();
+  const fileType = await FileType.fromBuffer(buffer);
+  
+  if (!fileType || !ALLOWED_MIME_TYPES[type].includes(fileType.mime)) {
+    throw new ValidationError('File content does not match declared type');
+  }
+
+  return true;
+}
+```
+
+### Authentication
+```typescript
+// JWT middleware
+async function authenticateUser(request: FastifyRequest, reply: FastifyReply) {
+  try {
+    const token = request.headers.authorization?.replace('Bearer ', '');
+    if (!token) {
+      throw new UnauthorizedError('Missing token');
+    }
+
+    const decoded = await verifyJWT(token);
+    request.user = await getUserById(decoded.sub);
+    
+    if (!request.user) {
+      throw new UnauthorizedError('User not found');
+    }
+  } catch (error) {
+    reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Invalid token' } });
+  }
+}
+```
+
+---
+
+## 9. Documentation Standards
+
+### Code Comments
+- Document complex algorithms
+- Explain "why" not "what"
+- Use JSDoc/docstrings for public APIs
+- Keep comments up-to-date
+
+```typescript
+/**
+ * Aligns scene transitions to detected beat timestamps.
+ * 
+ * This function adjusts scene start times to snap to the nearest beat,
+ * ensuring smooth visual transitions that match the music rhythm.
+ * 
+ * @param scenes - Array of scene objects with start_time and duration
+ * @param beats - Array of beat timestamps in seconds
+ * @param threshold - Maximum time shift allowed (default: 0.1s)
+ * @returns Aligned scenes with adjusted timings
+ * 
+ * @example
+ * ```typescript
+ * const scenes = [{ start_time: 0.45, duration: 10 }];
+ * const beats = [0.5, 1.0, 1.5];
+ * const aligned = alignScenesToBeats(scenes, beats);
+ * // aligned[0].start_time === 0.5 (snapped to nearest beat)
+ * ```
+ */
+function alignScenesToBeats(
+  scenes: Scene[],
+  beats: number[],
+  threshold: number = 0.1
+): Scene[] {
+  // Implementation
+}
+```
+
+### README Requirements
+- Clear setup instructions
+- Architecture overview
+- API documentation
+- Environment variables
+- Deployment guide
+- Troubleshooting section
+
+---
+
+## 10. Git Workflow
+
+### Commit Messages
+Follow Conventional Commits:
+- `feat: add agentic mode toggle`
+- `fix: resolve scene transition timing issue`
+- `docs: update API documentation`
+- `refactor: extract scene planner logic`
+- `test: add unit tests for beat detection`
+- `chore: upgrade dependencies`
+
+### Branch Strategy
+- `main` - production ready
+- `develop` - integration branch
+- `feature/pr*-description` - feature branches
+- `fix/description` - bugfix branches
+- `hotfix/description` - urgent production fixes
+
+### Pull Request Template
+```markdown
+## Description
+Brief description of changes
+
+## Type of Change
+- [ ] New feature
+- [ ] Bug fix
+- [ ] Breaking change
+- [ ] Documentation update
+
+## Testing
+- [ ] Unit tests pass
+- [ ] Integration tests pass
+- [ ] Manual testing completed
+- [ ] No new linter errors
+
+## Screenshots (if applicable)
+
+## Checklist
+- [ ] Code follows style guidelines
+- [ ] Self-review completed
+- [ ] Comments added for complex logic
+- [ ] Documentation updated
+- [ ] No console.log statements left
+```
+
+---
+
+## 11. Project-Specific Rules
+
+### Cost Management
+- Always track Replicate API costs
+- Use cheap models for development
+- Implement budget alerts
+- Cache aggressively
+- Provide cost estimates before generation
+
+### Video Quality Standards
+- Minimum 1080p resolution
+- 30 FPS for smooth playback
+- H.264 codec for compatibility
+- AAC audio codec
+- Proper bitrate (5-8 Mbps for 1080p)
+
+### Error Recovery
+- Retry failed API calls (max 3 times)
+- Graceful degradation (fallback to simpler models)
+- Save partial progress (resumable generation)
+- Clear error messages to users
+- Log errors with full context
+
+---
+
+## 12. Additional Resources
+
+### Useful Links
+- [Next.js Docs](https://nextjs.org/docs)
+- [Tailwind CSS](https://tailwindcss.com/docs)
+- [LangGraph Guide](https://langchain-ai.github.io/langgraph/)
+- [Replicate Docs](https://replicate.com/docs)
+- [FFmpeg Guide](https://ffmpeg.org/documentation.html)
+
+### Design Inspiration
+- [Dribbble - Video Tools](https://dribbble.com/search/video-editor)
+- [Runway ML UI](https://runwayml.com)
+- [Linear App Design](https://linear.app)
+- [Vercel Design System](https://vercel.com/design)
+
+---
+
+**Remember**: Ship fast, iterate quickly, and prioritize user experience. Quality over features!
+
