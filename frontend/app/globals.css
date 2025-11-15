@@ -9,27 +9,75 @@
   --muted: hsl(215, 20%, 65%);
   
   /* Primary colors */
-  --primary: hsl(215, 100%, 50%);
-  --primary-hover: hsl(215, 100%, 45%);
+  --primary-50: hsl(215, 100%, 97%);
+  --primary-100: hsl(215, 100%, 94%);
+  --primary-200: hsl(215, 100%, 88%);
+  --primary-300: hsl(215, 100%, 80%);
+  --primary-400: hsl(215, 100%, 65%);
+  --primary-500: hsl(215, 100%, 50%);
+  --primary-600: hsl(215, 100%, 45%);
+  --primary-700: hsl(215, 100%, 40%);
+  --primary-800: hsl(215, 100%, 30%);
+  --primary-900: hsl(215, 100%, 20%);
   
   /* Accent colors */
   --secondary: hsl(280, 90%, 60%);
   --success: hsl(142, 76%, 36%);
   --danger: hsl(0, 84%, 60%);
+  
+  /* Gradient colors */
+  --purple-400: hsl(280, 90%, 70%);
+  --pink-400: hsl(330, 90%, 70%);
 }
 
-@theme inline {
+@theme {
+  /* Core theme colors - mapped to CSS variables */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-surface: var(--surface);
   --color-surface-hover: var(--surface-hover);
   --color-muted: var(--muted);
-  --color-primary: var(--primary);
-  --color-primary-hover: var(--primary-hover);
+  
+  /* Black and white colors */
+  --color-black: #000000;
+  --color-white: #ffffff;
+  
+  /* Primary color scale */
+  --color-primary-50: var(--primary-50);
+  --color-primary-100: var(--primary-100);
+  --color-primary-200: var(--primary-200);
+  --color-primary-300: var(--primary-300);
+  --color-primary-400: var(--primary-400);
+  --color-primary-500: var(--primary-500);
+  --color-primary-600: var(--primary-600);
+  --color-primary-700: var(--primary-700);
+  --color-primary-800: var(--primary-800);
+  --color-primary-900: var(--primary-900);
+  
+  /* Accent colors */
   --color-secondary: var(--secondary);
   --color-success: var(--success);
   --color-danger: var(--danger);
-  --font-sans: var(--font-inter), system-ui, sans-serif;
+  
+  /* Gradient colors */
+  --color-purple-400: var(--purple-400);
+  --color-pink-400: var(--pink-400);
+  
+  /* Neutral colors for gradients */
+  --color-neutral-50: #fafafa;
+  --color-neutral-100: #f5f5f5;
+  --color-neutral-200: #e5e5e5;
+  --color-neutral-300: #d4d4d4;
+  --color-neutral-400: #a3a3a3;
+  --color-neutral-500: #737373;
+  --color-neutral-600: #525252;
+  --color-neutral-700: #404040;
+  --color-neutral-800: #262626;
+  --color-neutral-900: #171717;
+  --color-neutral-950: #0a0a0a;
+  
+  /* Fonts */
+  --font-sans: var(--font-geist-sans), system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), monospace;
 }
 
@@ -45,6 +93,8 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  margin: 0;
+  padding: 0;
 }
 
 /* Smooth scrolling */
@@ -68,5 +118,58 @@ html {
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--primary);
+  background: var(--primary-500);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-slow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.5s ease-out;
+}
+
+.animate-pulse-slow {
+  animation: pulse-slow 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes sparkle {
+  0% {
+    background-position: 0% 0%;
+  }
+  100% {
+    background-position: 200% 200%;
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-scale-in {
+  animation: scaleIn 0.3s ease-out;
 }

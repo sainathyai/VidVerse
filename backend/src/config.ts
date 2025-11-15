@@ -26,5 +26,19 @@ export const config = {
     maxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100', 10),
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
   },
+
+  storage: {
+    bucketName: process.env.S3_BUCKET_NAME || 'vidverse-assets',
+    region: process.env.S3_REGION || 'us-east-1',
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+    endpoint: process.env.S3_ENDPOINT,
+  },
+
+  cognito: {
+    userPoolId: process.env.COGNITO_USER_POOL_ID,
+    clientId: process.env.COGNITO_CLIENT_ID,
+    region: process.env.AWS_REGION || process.env.S3_REGION || 'us-east-1',
+  },
 } as const;
 

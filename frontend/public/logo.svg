@@ -1,0 +1,116 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Gradient for play button -->
+    <linearGradient id="playGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#14b8a6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#f97316;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Gradient for flowing lines -->
+    <linearGradient id="lineGradient1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#1e40af;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#0ea5e9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#14b8a6;stop-opacity:1" />
+    </linearGradient>
+    
+    <linearGradient id="lineGradient2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#0ea5e9;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#14b8a6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#f97316;stop-opacity:1" />
+    </linearGradient>
+    
+    <linearGradient id="lineGradient3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#14b8a6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#fbbf24;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Shadow filter -->
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
+      <feOffset dx="2" dy="2" result="offsetblur"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.3"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    
+    <!-- Soft shadow for triangles -->
+    <filter id="triangleShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+      <feOffset dx="1" dy="1" result="offsetblur"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.25"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Scattered teal triangles (above) -->
+  <g filter="url(#triangleShadow)">
+    <polygon points="40,30 50,20 45,35" fill="#14b8a6" opacity="0.9"/>
+    <polygon points="25,45 30,35 28,50" fill="#0ea5e9" opacity="0.8"/>
+    <polygon points="35,15 42,8 38,22" fill="#14b8a6" opacity="0.85"/>
+    <polygon points="20,25 28,18 24,32" fill="#0ea5e9" opacity="0.75"/>
+  </g>
+  
+  <!-- Flowing lines/swirls to the left of play button -->
+  <g filter="url(#shadow)">
+    <!-- Outer line (deep blue) -->
+    <path d="M 30 100 Q 50 60, 70 80 Q 85 95, 90 110" 
+          stroke="url(#lineGradient1)" 
+          stroke-width="8" 
+          fill="none" 
+          stroke-linecap="round"/>
+    
+    <!-- Middle line (bright blue to teal) -->
+    <path d="M 35 105 Q 55 70, 75 85 Q 88 98, 92 112" 
+          stroke="url(#lineGradient2)" 
+          stroke-width="6" 
+          fill="none" 
+          stroke-linecap="round"/>
+    
+    <!-- Inner line (teal to orange) -->
+    <path d="M 40 110 Q 60 80, 80 90 Q 91 101, 94 114" 
+          stroke="url(#lineGradient3)" 
+          stroke-width="4" 
+          fill="none" 
+          stroke-linecap="round"/>
+  </g>
+  
+  <!-- Central play button -->
+  <g filter="url(#shadow)">
+    <!-- Play button shadow layer -->
+    <path d="M 105 85 L 105 115 L 135 100 Z" 
+          fill="url(#playGradient)" 
+          opacity="0.3" 
+          transform="translate(2, 2)"/>
+    
+    <!-- Main play button -->
+    <path d="M 105 85 L 105 115 L 135 100 Z" 
+          fill="url(#playGradient)" 
+          stroke="#ffffff" 
+          stroke-width="2" 
+          stroke-opacity="0.3"/>
+    
+    <!-- Inner highlight -->
+    <path d="M 108 90 L 108 110 L 125 100 Z" 
+          fill="url(#playGradient)" 
+          opacity="0.4"/>
+  </g>
+  
+  <!-- Scattered orange/yellow triangles (below) -->
+  <g filter="url(#triangleShadow)">
+    <polygon points="150,140 160,130 155,145" fill="#f97316" opacity="0.9"/>
+    <polygon points="165,155 172,148 168,162" fill="#fbbf24" opacity="0.85"/>
+    <polygon points="140,160 148,152 144,168" fill="#f97316" opacity="0.8"/>
+    <polygon points="158,170 165,163 161,177" fill="#fbbf24" opacity="0.75"/>
+    <polygon points="145,150 152,143 148,157" fill="#f97316" opacity="0.85"/>
+  </g>
+</svg>
+

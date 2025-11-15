@@ -7,6 +7,10 @@ import swaggerUI from '@fastify/swagger-ui';
 import * as Sentry from '@sentry/node';
 import { config } from './config';
 import { healthRoutes } from './routes/health';
+import { projectRoutes } from './routes/projects';
+import { assetRoutes } from './routes/assets';
+import multipart from '@fastify/multipart';
+import { setFastifyInstance } from './middleware/cognito';
 
 // Initialize Sentry
 if (config.sentry.dsn) {
@@ -25,10 +29,14 @@ const fastify = Fastify({
       options: {
         translateTime: 'HH:MM:ss Z',
         ignore: 'pid,hostname',
+        colorize: true,
       },
     } : undefined,
   },
 });
+
+// Set fastify instance for Cognito middleware logging
+setFastifyInstance(fastify);
 
 // Register plugins
 async function registerPlugins() {
@@ -45,6 +53,13 @@ async function registerPlugins() {
   await fastify.register(rateLimit, {
     max: config.rateLimit.maxRequests,
     timeWindow: config.rateLimit.windowMs,
+  });
+
+  // Multipart form data support
+  await fastify.register(multipart, {
+    limits: {
+      fileSize: 100 * 1024 * 1024, // 100MB
+    },
   });
 
   // Swagger documentation
@@ -74,7 +89,8 @@ async function registerPlugins() {
 // Register routes
 async function registerRoutes() {
   await fastify.register(healthRoutes);
-  // More routes will be added in future PRs
+  await fastify.register(projectRoutes, { prefix: '/api' });
+  await fastify.register(assetRoutes, { prefix: '/api' });
 }
 
 // Error handler

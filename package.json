@@ -27,6 +27,7 @@
     "docker:logs": "docker-compose logs -f"
   },
   "devDependencies": {
+    "@mrzacsmith/cursor-rules": "^0.7.1",
     "concurrently": "^8.2.2"
   },
   "engines": {

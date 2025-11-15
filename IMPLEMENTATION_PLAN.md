@@ -4,9 +4,16 @@
 
 This document outlines the complete implementation strategy for building an end-to-end AI video generation pipeline with **agentic capabilities** using LangGraph. The system will leverage Replicate API for all AI model inference (video, image, audio) and provide users with toggleable agentic workflows, asset upload controls, and first/last frame management per scene.
 
+**Infrastructure:** AWS Cognito for authentication, AWS S3 for all asset storage (videos, frames, audio, images), organized by user and project.
+
 **Timeline:** 9-day sprint (Nov 14-23, 2025)  
 **MVP Deadline:** 48 hours (Nov 16)  
 **Final Submission:** Nov 23, 10:59 PM CT
+
+**Current Status:**
+- ✅ PR1: Project Foundation & Scaffolding - COMPLETE
+- ✅ PR2: Prompt Builder & Asset Upload - COMPLETE (with Cognito + S3)
+- ⏳ PR3: MVP Deterministic Pipeline - NEXT
 
 ---
 
@@ -76,7 +83,8 @@ This document outlines the complete implementation strategy for building an end-
 ┌────────────────────────▼────────────────────────────────────────┐
 │                    STORAGE & DATABASE                           │
 │  - PostgreSQL (Supabase): projects, scenes, jobs, users        │
-│  - S3/R2: asset storage (audio, images, videos, renders)       │
+│  - AWS S3: asset storage (audio, images, videos, frames)       │
+│    └─ Organized: users/{userId}/projects/{projectId}/{type}/   │
 │  - Redis: caching, sessions, real-time progress                │
 │  - Vector DB (optional): style embeddings for consistency      │
 └─────────────────────────────────────────────────────────────────┘
@@ -113,22 +121,23 @@ This document outlines the complete implementation strategy for building an end-
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
 | **Primary Runtime** | **Node.js 20 LTS** + **TypeScript** | Shared types with frontend, excellent async I/O, npm ecosystem |
-| **API Framework** | **Fastify v4** or **tRPC v11** | Fastify: performance leader. tRPC: end-to-end type safety with Next.js |
+| **API Framework** | **Fastify v4** | Performance leader, excellent plugin ecosystem, built-in validation |
 | **Alternative Runtime** | **Python 3.11+** with **FastAPI** | If LangGraph integration is primary concern; async/await, type hints |
 | **Agentic Framework** | **LangGraph** (Python, LangChain ecosystem) | Purpose-built for agent workflows, tool calling, state graphs |
 | **LLM Integration** | **OpenAI GPT-4o** or **Anthropic Claude 3.5 Sonnet** | Reasoning for scene planning, prompt refinement, QA critique |
 | **Job Queue** | **BullMQ** (Node) or **Celery** (Python) | Distributed task execution, retries, rate limiting, priority queues |
-| **Auth** | **Clerk** or **Auth0** or **Supabase Auth** | Pre-built UI, session management, social logins |
+| **Auth** | **AWS Cognito** | Managed authentication, JWT tokens, user pools, MFA support |
 | **Rate Limiting** | **Upstash Redis** with sliding window | Distributed rate limits, cost control per user |
-| **API Docs** | **Scalar** or **Swagger/OpenAPI** | Interactive docs for judges, API testing |
+| **API Docs** | **Swagger/OpenAPI** (Fastify Swagger) | Interactive docs for judges, API testing |
 
 ### Database & Storage
 
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
 | **Primary Database** | **PostgreSQL 15+** (via **Supabase** or **Neon**) | JSONB for scene graphs, row-level security, real-time subscriptions |
-| **Object Storage** | **AWS S3** or **Cloudflare R2** | Asset storage (audio, images, videos), R2 has zero egress fees |
-| **CDN** | **CloudFront** (S3) or **R2 CDN** | Fast global delivery of generated videos |
+| **Object Storage** | **AWS S3** | Primary storage for all assets (audio, images, videos, frames, generated content) |
+| **S3 Organization** | **User/Project-based folders** | `users/{userId}/projects/{projectId}/{type}/` structure for organized access |
+| **CDN** | **CloudFront** (S3) | Fast global delivery of generated videos and assets |
 | **Cache Layer** | **Redis 7** (Upstash or self-hosted) | Session store, job queue, generation cache (prompt → result mapping) |
 | **Vector DB** (optional) | **Pinecone** or **Weaviate** or **pgvector** | Style embeddings for consistency, similarity search for assets |
 
@@ -158,11 +167,14 @@ This document outlines the complete implementation strategy for building an end-
 |-----------|-----------|-----------|
 | **Container Runtime** | **Docker** + **Docker Compose** (dev) | Consistent environments, FFmpeg bundling |
 | **Orchestration** | **Railway** or **Render** or **Fly.io** | Fast deploys, auto-scaling, built-in Redis/Postgres |
+| **Authentication** | **AWS Cognito** | Managed user authentication, JWT tokens, user pools |
+| **Storage** | **AWS S3** | Object storage for all assets (videos, frames, audio, images) |
+| **IAM** | **AWS IAM** | Access control for S3, Cognito, and other AWS services |
 | **CI/CD** | **GitHub Actions** | Auto-deploy on PR merge, lint/test pipelines |
 | **Monitoring** | **Datadog** or **Logfire** (Pydantic team) | Distributed tracing, LLM observability, cost metrics |
 | **Error Tracking** | **Sentry** | Real-time error alerts, performance monitoring |
 | **Log Management** | **Better Stack** or **Axiom** | Structured logs, fast search, generous free tier |
-| **Secrets** | **Doppler** or **.env.vault** | Encrypted secrets, team sync |
+| **Secrets** | **AWS Secrets Manager** or **Doppler** | Encrypted secrets, team sync |
 
 ### Development Tools
 
@@ -205,27 +217,35 @@ This document outlines the complete implementation strategy for building an end-
 - `CostDashboard`: Per-project cost breakdown, model usage stats
 - `VideoPlayer`: Scrubbing, scene markers, export options
 
-### 2. API Gateway (Fastify or FastAPI)
+### 2. API Gateway (Fastify)
 
 **Endpoints:**
 ```
-POST   /api/projects                    → Create new project
-GET    /api/projects/:id                → Get project details
-POST   /api/projects/:id/generate       → Trigger generation job
-POST   /api/projects/:id/scenes/:sceneId/regenerate → Regen one scene
-POST   /api/assets/upload               → Get signed upload URL
-POST   /api/chat                         → Send edit instruction (agentic)
-GET    /api/jobs/:jobId/status           → Poll job progress
-GET    /api/jobs/:jobId/result           → Get final video URL
-WS     /ws/projects/:id                  → Real-time updates
+POST   /api/projects                    → Create new project (🔒 Auth required)
+GET    /api/projects                    → List user projects (🔒 Auth required)
+GET    /api/projects/:id                → Get project details (🔒 Auth required)
+PATCH  /api/projects/:id                → Update project (🔒 Auth required)
+DELETE /api/projects/:id                → Delete project (🔒 Auth required)
+POST   /api/projects/:id/generate       → Trigger generation job (🔒 Auth required)
+POST   /api/projects/:id/scenes/:sceneId/regenerate → Regen one scene (🔒 Auth required)
+POST   /api/assets/upload-url           → Get S3 presigned upload URL (🔒 Auth required)
+POST   /api/assets/upload               → Direct server-side upload (🔒 Auth required)
+POST   /api/chat                         → Send edit instruction (agentic) (🔒 Auth required)
+GET    /api/jobs/:jobId/status           → Poll job progress (🔒 Auth required)
+GET    /api/jobs/:jobId/result           → Get final video URL (🔒 Auth required)
+WS     /ws/projects/:id                  → Real-time updates (🔒 Auth required)
+GET    /health                           → Health check (Public)
+GET    /docs                             → API documentation (Public)
 ```
 
 **Middleware:**
-- Auth verification (JWT from Clerk/Auth0)
+- Auth verification (JWT from AWS Cognito)
 - Rate limiting (10 concurrent jobs per user)
 - Request validation (Zod schemas)
 - Error handling (structured logging)
 - Cost tracking (increment per API call)
+- CORS configuration
+- Security headers (Helmet)
 
 ### 3. LangGraph Agentic Workflow
 
@@ -318,6 +338,62 @@ def cache_generation(prompt: str, model: str, seed: int, result_url: str):
     cache_key = f"gen:{hashlib.sha256(f'{prompt}{model}{seed}'.encode()).hexdigest()}"
     redis_client.setex(cache_key, 86400 * 7, result_url)  # 7 day TTL
 ```
+
+### 4a. S3 Storage Infrastructure
+
+**Storage Organization:**
+```
+S3 Bucket: vidverse-assets
+├── users/
+│   └── {userId}/
+│       ├── audio/              # User-uploaded audio files
+│       ├── image/              # User-uploaded images
+│       ├── video/              # User-uploaded videos
+│       ├── brand_kit/          # Brand assets (logos, fonts, colors)
+│       └── projects/
+│           └── {projectId}/
+│               ├── audio/      # Project-specific audio
+│               ├── video/      # Generated videos ⭐
+│               ├── frame/      # First/last frames per scene ⭐
+│               └── image/      # Generated images
+```
+
+**Storage Service Functions:**
+- `generateUploadUrl()` - Generate presigned URL for client uploads
+- `uploadFile()` - Direct server-side upload
+- `uploadGeneratedVideo()` - Upload generated video to S3
+- `uploadFrame()` - Upload first/last frame to S3
+- `uploadAudio()` - Upload processed audio to S3
+- `generateDownloadUrl()` - Generate presigned download URL
+
+**Asset Types:**
+- `audio` - Music, sound effects, voiceovers
+- `image` - Reference images, style guides
+- `video` - Generated videos, user uploads
+- `frame` - First/last frames per scene
+- `brand_kit` - Logos, fonts, color palettes
+
+### 4b. AWS Cognito Authentication
+
+**Frontend Integration:**
+- AWS Amplify for Cognito client
+- AuthProvider context for session management
+- Protected routes component
+- Automatic token injection in API calls
+
+**Backend Integration:**
+- JWT token verification using `aws-jwt-verify`
+- Authentication middleware for protected routes
+- User extraction from Cognito tokens
+- User-scoped data access
+
+**User Flow:**
+1. User signs up with email/username/password
+2. Email confirmation required
+3. User signs in → receives JWT tokens
+4. Tokens included in all API requests
+5. Backend validates tokens and extracts user ID
+6. All data scoped to authenticated user
 
 ### 5. Media Composition Pipeline
 
@@ -448,35 +524,43 @@ CREATE INDEX idx_jobs_project_status ON jobs(project_id, status);
 
 ---
 
-### PR2: Prompt Builder & Asset Upload
+### PR2: Prompt Builder & Asset Upload ✅ COMPLETE
 **Timeline:** Day 1-2 (Nov 15-16, morning)  
 **Owner:** Frontend + Backend pair  
-**Goal:** Users can input prompts and upload assets
+**Goal:** Users can input prompts and upload assets  
+**Status:** ✅ All tasks completed, Cognito auth and S3 storage implemented
 
 **Tasks:**
-- [ ] Build multi-step prompt form (category, duration, style, constraints)
-- [ ] Integrate React Hook Form + Zod validation
-- [ ] Create `projects` table CRUD endpoints
-- [ ] Implement file upload with signed URLs (S3/R2)
-- [ ] Add UploadThing or tus.js for resumable uploads
-- [ ] Store asset metadata in `assets` table
-- [ ] Basic audio file validation (format, duration)
-- [ ] Display uploaded audio waveform (use WaveSurfer.js)
-- [ ] Create project dashboard showing all user projects
-- [ ] Add authentication (Clerk or Supabase Auth)
+- [x] Build multi-step prompt form (category, duration, style, constraints)
+- [x] Integrate React Hook Form + Zod validation
+- [x] Create `projects` table CRUD endpoints
+- [x] Implement file upload with signed URLs (S3)
+- [x] Store asset metadata in `assets` table
+- [x] Basic audio file validation (format, duration)
+- [x] Display uploaded audio waveform (use WaveSurfer.js)
+- [x] Create project dashboard showing all user projects
+- [x] Add authentication (AWS Cognito)
+- [x] Set up S3 storage with organized folder structure
+- [x] Implement JWT token verification middleware
+- [x] Add protected routes with authentication
 
 **Deliverables:**
 - ✅ User can create project with prompt
 - ✅ User can upload audio file
-- ✅ Assets stored in S3/R2 with URLs in database
+- ✅ Assets stored in S3 with organized folder structure
 - ✅ Project list page showing created projects
+- ✅ AWS Cognito authentication (sign up, sign in, sign out)
+- ✅ Protected routes requiring authentication
+- ✅ JWT token validation on all API endpoints
+- ✅ User-scoped data access
 
 **Tech Stack:**
 - React Hook Form + Zod
-- UploadThing or tus.js
-- S3/R2 signed URLs
-- Clerk or Supabase Auth
-- WaveSurfer.js (audio viz)
+- AWS S3 presigned URLs
+- AWS Cognito (authentication)
+- AWS Amplify (frontend Cognito integration)
+- WaveSurfer.js (audio visualization)
+- aws-jwt-verify (backend token verification)
 
 ---
 
@@ -493,9 +577,12 @@ CREATE INDEX idx_jobs_project_status ON jobs(project_id, status);
 - [ ] Call Replicate video generation API for each scene
 - [ ] Implement retry logic with exponential backoff
 - [ ] Download generated clips to temp storage
+- [ ] Extract first/last frames from each scene (FFmpeg)
+- [ ] Upload frames to S3 using `uploadFrame()` service
 - [ ] Use FFmpeg to concatenate clips (simple concat, no transitions yet)
 - [ ] Add audio overlay with FFmpeg
-- [ ] Upload final video to S3/R2
+- [ ] Upload final video to S3 using `uploadGeneratedVideo()` service
+- [ ] Store video and frame URLs in database
 - [ ] Create job queue with BullMQ/Celery
 - [ ] Add job status polling endpoint
 - [ ] Build simple progress UI (queued → processing → completed)
@@ -510,8 +597,10 @@ CREATE INDEX idx_jobs_project_status ON jobs(project_id, status);
 **Tech Stack:**
 - Replicate Python SDK
 - BullMQ (Node) or Celery (Python)
-- FFmpeg (video concat, audio mix)
+- FFmpeg (video concat, audio mix, frame extraction)
 - Librosa (basic beat detection)
+- AWS S3 (storage for videos and frames)
+- Storage service (`uploadGeneratedVideo()`, `uploadFrame()`)
 
 **CRITICAL:** This PR must be merged by Sunday morning (48h deadline). Focus on reliability over features.
 
@@ -909,14 +998,40 @@ Answer these questions:
 
 ---
 
+## Infrastructure Requirements
+
+### AWS Services Setup
+1. **AWS Cognito User Pool**
+   - User authentication and JWT tokens
+   - See `COGNITO_SETUP.md` for detailed setup
+   - Required environment variables configured
+
+2. **AWS S3 Bucket**
+   - Object storage for all assets
+   - Organized folder structure: `users/{userId}/projects/{projectId}/{type}/`
+   - IAM user with appropriate permissions
+   - CORS configuration for browser uploads
+   - See `INFRASTRUCTURE.md` for detailed setup
+
+3. **IAM Configuration**
+   - IAM user for S3 access
+   - Minimal permissions policy
+   - Access keys stored securely
+
+### Environment Configuration
+- All AWS credentials configured in environment variables
+- Frontend and backend environment files set up
+- S3 bucket created and accessible
+- Cognito User Pool created and configured
+
 ## Next Steps
 
 ### Immediate Actions (Today)
-1. **Assign PR ownership** (who owns each PR)
-2. **Set up dev environment** (run PR1 tasks)
-3. **Order Replicate credits** (estimate $500-1000 for development + finals)
-4. **Create project timeline** (Gantt chart with PR deadlines)
-5. **Start PR2** (prompt form + upload) in parallel with PR1 finalization
+1. ✅ **PR1 Complete** - Project foundation established
+2. ✅ **PR2 Complete** - Prompt builder, asset upload, Cognito auth, S3 storage
+3. **Set up AWS Infrastructure** (Cognito + S3) - See `COGNITO_SETUP.md` and `INFRASTRUCTURE.md`
+4. **Order Replicate credits** (estimate $500-1000 for development + finals)
+5. **Start PR3** - MVP Deterministic Pipeline
 
 ### Daily Milestones
 - **Day 0 (Nov 14):** PR1 merged, dev environment working
