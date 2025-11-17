@@ -344,14 +344,30 @@ export async function generateVideo(
   
   // Fetch all models to get details for the selected model
   const allVideoModels = await fetchVideoGenerationModels();
-  const selectedModel = allVideoModels.find(m => m.id === selectedModelId);
+  let selectedModel = allVideoModels.find(m => m.id === selectedModelId);
+  
+  // Special handling: If google/veo-3.1 is requested but not available, fall back to google/veo-3
+  if (!selectedModel && selectedModelId === 'google/veo-3.1') {
+    console.warn(`[REPLICATE] Model google/veo-3.1 not available, falling back to google/veo-3`);
+    selectedModel = allVideoModels.find(m => m.id === 'google/veo-3');
+    if (selectedModel) {
+      console.log(`[REPLICATE] Using fallback model: google/veo-3 (${selectedModel.name})`);
+    }
+  }
   
   if (selectedModel) {
     videoGenerationModels = [selectedModel];
     console.log(`[REPLICATE] Using model: ${selectedModel.id} (${selectedModel.name})`);
   } else {
     // Fallback: try to find model in fallback list
-    const fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === selectedModelId);
+    let fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === selectedModelId);
+    
+    // Special handling: If google/veo-3.1 is requested but not in fallback, use google/veo-3
+    if (!fallbackModel && selectedModelId === 'google/veo-3.1') {
+      console.warn(`[REPLICATE] Model google/veo-3.1 not in fallback list, using google/veo-3`);
+      fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === 'google/veo-3');
+    }
+    
     if (fallbackModel) {
       videoGenerationModels = [fallbackModel];
       console.log(`[REPLICATE] Using fallback model: ${fallbackModel.id} (${fallbackModel.name})`);
