@@ -816,9 +816,47 @@ export async function generateVideo(
         // Check for HTTP status codes in error
         const statusCode = error.status || error.statusCode || (error.response?.status);
         
-        if (error.message) {
-          // Check if error message contains status information
-          if (error.message.includes('500')) {
+        // Helper function to extract text from HTML error responses
+        const extractTextFromHtml = (html: string): string => {
+          // Remove HTML tags and decode entities
+          let text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+          // Extract meaningful error text (e.g., "Server Error", "Please try again in 30 seconds")
+          const match = text.match(/(?:Error|error):\s*([^\.]+)/i);
+          if (match) {
+            return match[1].trim();
+          }
+          return text.substring(0, 100); // Limit length
+        };
+        
+        // Handle specific HTTP status codes first
+        if (statusCode === 502 || statusCode === 503 || statusCode === 504) {
+          errorMessage = `Model ${model.id} is temporarily unavailable (${statusCode} Bad Gateway). The service may be experiencing high load. Please try again in a few moments.`;
+        } else if (statusCode === 500) {
+          errorMessage = `Model ${model.id} is experiencing temporary issues (500 Internal Server Error). Please try again.`;
+        } else if (statusCode === 422) {
+          errorMessage = `Model ${model.id} is not available or not accessible (422).`;
+        } else if (statusCode === 429) {
+          errorMessage = `Rate limit exceeded for model ${model.id}. Please wait a moment and try again.`;
+        } else if (statusCode === 401 || statusCode === 403) {
+          errorMessage = 'Authentication failed. Please check your REPLICATE_API_TOKEN in the backend .env file.';
+        } else if (error.response?.data?.detail) {
+          // Extract detail from JSON response
+          const detail = typeof error.response.data.detail === 'string' 
+            ? error.response.data.detail 
+            : JSON.stringify(error.response.data.detail);
+          errorMessage = `Model ${model.id}: ${detail}`;
+        } else if (error.message) {
+          // Check if error message contains HTML (502/503 responses often do)
+          if (error.message.includes('<html>') || error.message.includes('<body>')) {
+            const cleanMessage = extractTextFromHtml(error.message);
+            if (statusCode) {
+              errorMessage = `Model ${model.id} returned ${statusCode} error: ${cleanMessage}`;
+            } else {
+              errorMessage = `Model ${model.id}: ${cleanMessage}`;
+            }
+          } else if (error.message.includes('502') || error.message.includes('503') || error.message.includes('504')) {
+            errorMessage = `Model ${model.id} is temporarily unavailable (Bad Gateway). The service may be experiencing high load. Please try again in a few moments.`;
+          } else if (error.message.includes('500')) {
             errorMessage = `Model ${model.id} is experiencing temporary issues (500 Internal Server Error).`;
           } else if (error.message.includes('422')) {
             errorMessage = `Model ${model.id} is not available or not accessible (422).`;
@@ -827,18 +865,22 @@ export async function generateVideo(
           } else if (error.message.includes('401') || error.message.includes('403')) {
             errorMessage = 'Authentication failed. Please check your REPLICATE_API_TOKEN in the backend .env file.';
           } else {
-            errorMessage = `${model.id}: ${error.message}`;
+            // Clean up the error message - remove URLs and HTML if present
+            let cleanMsg = error.message;
+            if (cleanMsg.includes('Request to')) {
+              // Extract just the status code and error type
+              const statusMatch = cleanMsg.match(/status (\d+)/);
+              const errorTypeMatch = cleanMsg.match(/(\d+ [^:]+)/);
+              if (statusMatch && errorTypeMatch) {
+                cleanMsg = `${errorTypeMatch[1]}`;
+              }
+            }
+            // Remove HTML if present
+            if (cleanMsg.includes('<html>')) {
+              cleanMsg = extractTextFromHtml(cleanMsg);
+            }
+            errorMessage = `${model.id}: ${cleanMsg}`;
           }
-        } else if (statusCode === 500) {
-          errorMessage = `Model ${model.id} is experiencing temporary issues (500 Internal Server Error).`;
-        } else if (statusCode === 422) {
-          errorMessage = `Model ${model.id} is not available or not accessible (422).`;
-        } else if (statusCode === 429) {
-          errorMessage = `Rate limit exceeded for model ${model.id}.`;
-        } else if (statusCode === 401 || statusCode === 403) {
-          errorMessage = 'Authentication failed. Please check your REPLICATE_API_TOKEN in the backend .env file.';
-        } else if (error.response?.data?.detail) {
-          errorMessage = `Model ${model.id}: ${error.response.data.detail}`;
         }
         
         // If this is the last attempt on the last model, return failure
