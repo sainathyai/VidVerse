@@ -460,7 +460,7 @@ export async function generateVideo(
             
             console.log(`[REPLICATE] Adding Veo 3 Fast parameters: aspect_ratio=${veoFastAspectRatio}, duration=${modelInput.duration}, resolution=${modelInput.resolution}, generate_audio=${modelInput.generate_audio}, enhance_prompt=${modelInput.enhance_prompt}`);
           } else if (isSora2 || isSora2Pro) {
-            // Sora-2 and Sora-2 Pro format: aspect_ratio as "portrait" or "landscape", seconds, resolution (Pro only)
+            // Sora-2 and Sora-2 Pro format: prompt, aspect_ratio, seconds, input_reference (optional), resolution (Pro only)
             let soraAspectRatio: string;
             if (aspectRatio) {
               // Normalize aspect ratio format first
@@ -496,16 +496,16 @@ export async function generateVideo(
             modelInput.seconds = soraSeconds;
             console.log(`[REPLICATE] Setting seconds parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${soraSeconds} (requested: ${duration})`);
             
+            // Sora-2 and Sora-2 Pro support input_reference (image URL for first frame)
+            if (options.image) {
+              modelInput.input_reference = options.image;
+              console.log(`[REPLICATE] Adding input_reference parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${options.image}`);
+            }
+            
             // Sora-2 Pro specific: resolution parameter ("standard" or "high")
             if (isSora2Pro) {
               modelInput.resolution = 'standard'; // Default to "standard" (720p), can be "high" (1024p)
               console.log(`[REPLICATE] Setting resolution parameter for Sora-2 Pro: ${modelInput.resolution}`);
-            }
-            
-            // Sora-2 Pro supports input_reference (image URL for first frame)
-            if (isSora2Pro && options.image) {
-              modelInput.input_reference = options.image;
-              console.log(`[REPLICATE] Adding input_reference parameter for Sora-2 Pro: ${options.image}`);
             }
           } else if (isVeo3) {
             // Veo 3/3.1 format: prompt, aspect_ratio, duration, resolution, generate_audio, image, negative_prompt, seed
