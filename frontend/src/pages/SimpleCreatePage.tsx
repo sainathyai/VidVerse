@@ -33,6 +33,7 @@ function SimpleCreateContent() {
   const [pacing, setPacing] = useState("medium");
   const [videoModelId, setVideoModelId] = useState('google/veo-3.1');
   const [imageModelId, setImageModelId] = useState('openai/dall-e-3');
+  const [useReferenceFrame, setUseReferenceFrame] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [showConfirmationModal, setShowConfirmationModal] = useState(false);
   const [showProgressModal, setShowProgressModal] = useState(false);
@@ -394,7 +395,8 @@ function SimpleCreateContent() {
             colorPalette,
             pacing,
             videoModelId,
-        imageModelId,
+            imageModelId,
+            useReferenceFrame,
             mode: 'classic',
           }),
         }, token);
@@ -492,6 +494,7 @@ function SimpleCreateContent() {
         if (config.pacing) setPacing(config.pacing);
         if (config.videoModelId) setVideoModelId(config.videoModelId);
         if (config.imageModelId) setImageModelId(config.imageModelId);
+        if (config.useReferenceFrame !== undefined) setUseReferenceFrame(config.useReferenceFrame);
         }
         
         setCurrentProjectId(latestDraftProject.id);
@@ -721,7 +724,8 @@ function SimpleCreateContent() {
             colorPalette,
             pacing,
             videoModelId,
-        imageModelId,
+            imageModelId,
+            useReferenceFrame,
             mode: 'classic',
           }),
         }, token);
@@ -792,6 +796,7 @@ function SimpleCreateContent() {
       }, 1000);
       
       // Call synchronous generation endpoint
+      // Send current settings to override database config (user may have changed settings)
       try {
         const result = await apiRequest<{
           status: string;
@@ -802,7 +807,15 @@ function SimpleCreateContent() {
           `/api/projects/${projectIdToUse}/generate-sync`,
           {
             method: 'POST',
-            body: JSON.stringify({}),
+            body: JSON.stringify({
+              useReferenceFrame,
+              videoModelId,
+              aspectRatio,
+              style,
+              mood,
+              colorPalette,
+              pacing,
+            }),
           },
           token
         );
@@ -1209,6 +1222,24 @@ function SimpleCreateContent() {
                 </select>
               </div>
             </div>
+
+            {/* Use Reference Frame Checkbox */}
+            <div className="animate-fade-in" style={{ animationDelay: '0.65s' }}>
+              <label className="flex items-center gap-2 cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={useReferenceFrame}
+                  onChange={(e) => setUseReferenceFrame(e.target.checked)}
+                  className="w-4 h-4 rounded border-white/20 bg-white/5 text-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:ring-offset-0 cursor-pointer"
+                />
+                <span className="text-sm text-white/70 group-hover:text-white transition-colors">
+                  Use last frame as reference for scene transitions
+                </span>
+              </label>
+              <p className="mt-1 ml-6 text-xs text-white/50">
+                Helps maintain visual continuity between scenes (may trigger content filters)
+              </p>
+            </div>
           </div>
 
           {/* Settings Label at Bottom */}
@@ -1447,7 +1478,8 @@ function SimpleCreateContent() {
           colorPalette,
           pacing,
           videoModelId,
-        imageModelId,
+          imageModelId,
+          useReferenceFrame,
         }}
         onGenerateScript={handleGenerateScript}
         onConfirmScript={handleConfirmScript}

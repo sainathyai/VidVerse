@@ -104,17 +104,31 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
         };
         
         // Use last frame from previous scene as reference for smooth transitions
-        // For Veo 3.1, use lastFrame parameter; for other models, use image parameter
+        // Only if useReferenceFrame is enabled (defaults to false - user must opt-in)
+        const shouldUseReferenceFrame = config.useReferenceFrame === true;
+        
+        // Explicitly ensure reference frame parameters are not included when disabled
         if (previousSceneLastFrameUrl && i > 0) {
-          const selectedModelId = config.videoModelId || 'google/veo-3.1';
-          if (selectedModelId === 'google/veo-3.1') {
-            videoGenOptions.lastFrame = previousSceneLastFrameUrl;
-            console.log(`[WORKER] Using last frame from scene ${i} as reference for Veo 3.1: ${previousSceneLastFrameUrl}`);
+          if (shouldUseReferenceFrame) {
+            const selectedModelId = config.videoModelId || 'google/veo-3.1';
+            if (selectedModelId === 'google/veo-3.1') {
+              videoGenOptions.lastFrame = previousSceneLastFrameUrl;
+              console.log(`[WORKER] Using last frame from scene ${i} as reference for Veo 3.1: ${previousSceneLastFrameUrl}`);
+            } else {
+              // For other models (Veo 3, Veo 3 Fast, Sora 2, Kling), use image parameter
+              videoGenOptions.image = previousSceneLastFrameUrl;
+              console.log(`[WORKER] Using last frame from scene ${i} as reference image: ${previousSceneLastFrameUrl}`);
+            }
           } else {
-            // For other models (Veo 3, Veo 3 Fast, Sora 2, Kling), use image parameter
-            videoGenOptions.image = previousSceneLastFrameUrl;
-            console.log(`[WORKER] Using last frame from scene ${i} as reference image: ${previousSceneLastFrameUrl}`);
+            // Explicitly ensure these are not set when useReferenceFrame is false
+            delete videoGenOptions.lastFrame;
+            delete videoGenOptions.image;
+            console.log(`[WORKER] Skipping reference frame for scene ${i + 1} (useReferenceFrame disabled) - not including in Replicate API call`);
           }
+        } else {
+          // Ensure these are not set for first scene or when no previous frame exists
+          delete videoGenOptions.lastFrame;
+          delete videoGenOptions.image;
         }
 
         // Generate video for scene with user's selected video model and aspect ratio

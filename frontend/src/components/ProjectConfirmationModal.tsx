@@ -13,7 +13,9 @@ interface ProjectConfirmationModalProps {
     aspectRatio: string;
     colorPalette: string;
     pacing: string;
-    costPerSecond: number;
+    videoModelId?: string;
+    imageModelId?: string;
+    useReferenceFrame?: boolean;
   };
   onGenerateScript: () => Promise<void>;
   onConfirmScript: () => Promise<void>;

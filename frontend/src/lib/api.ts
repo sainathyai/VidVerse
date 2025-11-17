@@ -25,15 +25,19 @@ async function getAccessTokenFromStorage(): Promise<string | null> {
       if (payload.exp * 1000 > Date.now()) {
         return accessToken;
       } else {
-        // Token expired, remove it
+        // Token expired, remove it and user data
         localStorage.removeItem('cognito_access_token');
         localStorage.removeItem('cognito_id_token');
         localStorage.removeItem('cognito_refresh_token');
+        localStorage.removeItem('cognito_user');
         return null;
       }
     } catch (error) {
       // Error decoding, treat as invalid
       localStorage.removeItem('cognito_access_token');
+      localStorage.removeItem('cognito_id_token');
+      localStorage.removeItem('cognito_refresh_token');
+      localStorage.removeItem('cognito_user');
       return null;
     }
   }

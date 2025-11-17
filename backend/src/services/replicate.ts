@@ -1,5 +1,6 @@
 import Replicate from 'replicate';
 import { config } from '../config';
+import { convertS3UrlToPresigned } from './storage';
 
 // Initialize Replicate client only if token is provided
 let replicate: Replicate | null = null;
@@ -303,6 +304,96 @@ export interface VideoGenerationResult {
 }
 
 /**
+ * Convert and validate image URL for Replicate API
+ * - Converts S3 URLs to presigned URLs (24 hour expiration for Replicate access)
+ * - Validates URL is accessible via HEAD request
+ * - Returns null if URL is invalid or inaccessible (caller should skip parameter)
+ */
+async function prepareImageUrlForReplicate(
+  url: string | undefined | null,
+  urlType: 'lastFrame' | 'image' = 'image'
+): Promise<string | null> {
+  if (!url || typeof url !== 'string' || url.trim().length === 0) {
+    return null;
+  }
+
+  const trimmedUrl = url.trim();
+
+  // Validate URL format (must be HTTPS)
+  try {
+    const urlObj = new URL(trimmedUrl);
+    if (urlObj.protocol !== 'https:') {
+      console.warn(`[REPLICATE] ${urlType} URL must use HTTPS protocol: ${trimmedUrl.substring(0, 100)}`);
+      return null;
+    }
+  } catch (error) {
+    console.warn(`[REPLICATE] Invalid ${urlType} URL format: ${trimmedUrl.substring(0, 100)}`, error);
+    return null;
+  }
+
+  // Check URL length (Replicate may have limits)
+  if (trimmedUrl.length > 2048) {
+    console.warn(`[REPLICATE] ${urlType} URL is too long (${trimmedUrl.length} chars, max ~2048): ${trimmedUrl.substring(0, 100)}...`);
+    return null;
+  }
+
+  try {
+    // Convert S3 URLs to presigned URLs (24 hour expiration for Replicate to access)
+    const presignedUrl = await convertS3UrlToPresigned(trimmedUrl, 86400); // 24 hours
+    
+    if (!presignedUrl) {
+      console.warn(`[REPLICATE] Failed to convert ${urlType} URL to presigned URL: ${trimmedUrl.substring(0, 100)}`);
+      return null;
+    }
+
+    // Validate URL is accessible via HEAD request (with timeout)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+    try {
+      const response = await fetch(presignedUrl, {
+        method: 'HEAD',
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'VidVerse/1.0',
+        },
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        console.warn(`[REPLICATE] ${urlType} URL is not accessible (HTTP ${response.status}): ${presignedUrl.substring(0, 100)}`);
+        return null;
+      }
+
+      // Check content type if available
+      const contentType = response.headers.get('content-type');
+      if (contentType && !contentType.startsWith('image/')) {
+        console.warn(`[REPLICATE] ${urlType} URL does not point to an image (Content-Type: ${contentType}): ${presignedUrl.substring(0, 100)}`);
+        // Still return URL - some servers don't set content-type correctly
+      }
+
+      console.log(`[REPLICATE] Successfully validated ${urlType} URL (${response.status}, ${contentType || 'unknown type'}): ${presignedUrl.substring(0, 100)}...`);
+      return presignedUrl;
+    } catch (fetchError: any) {
+      clearTimeout(timeoutId);
+      
+      if (fetchError.name === 'AbortError') {
+        console.warn(`[REPLICATE] ${urlType} URL validation timed out: ${presignedUrl.substring(0, 100)}`);
+      } else {
+        console.warn(`[REPLICATE] ${urlType} URL validation failed: ${presignedUrl.substring(0, 100)}`, fetchError.message);
+      }
+      // Return URL anyway - validation failure doesn't mean Replicate can't access it
+      // (might be network issue, CORS, etc.)
+      return presignedUrl;
+    }
+  } catch (error: any) {
+    console.error(`[REPLICATE] Error preparing ${urlType} URL for Replicate: ${trimmedUrl.substring(0, 100)}`, error?.message || error);
+    return null;
+  }
+}
+
+/**
  * Generate video using Replicate API with retry logic
  */
 export async function generateVideo(
@@ -467,17 +558,17 @@ export async function generateVideo(
         }
         
         // Model-specific prompt length limits (characters)
-        // Most modern video models support 3000+ characters for detailed prompts
+        // Increased to 12000 characters to support very detailed scene descriptions
         const modelPromptLimits: Record<string, number> = {
-          'openai/sora-2': 3000,        // Sora 2 supports longer prompts
-          'openai/sora-2-pro': 3000,    // Sora 2 Pro supports longer prompts
-          'google/veo-3': 3000,         // Veo 3 supports longer prompts
-          'google/veo-3.1': 3000,       // Veo 3.1 supports longer prompts
-          'google/veo-3-fast': 3000,    // Veo 3 Fast supports longer prompts
-          'kwaivgi/kling-v2.5-turbo-pro': 3000, // Kling supports longer prompts
+          'openai/sora-2': 12000,        // Sora 2 supports very long prompts
+          'openai/sora-2-pro': 12000,    // Sora 2 Pro supports very long prompts
+          'google/veo-3': 12000,         // Veo 3 supports very long prompts
+          'google/veo-3.1': 12000,       // Veo 3.1 supports very long prompts
+          'google/veo-3-fast': 12000,    // Veo 3 Fast supports very long prompts
+          'kwaivgi/kling-v2.5-turbo-pro': 12000, // Kling supports very long prompts
         };
         
-        const maxPromptLength = modelPromptLimits[model.id] || 3000; // Default to 3000 characters
+        const maxPromptLength = modelPromptLimits[model.id] || 12000; // Default to 12000 characters
         const truncatedPrompt = enhancedPrompt.length > maxPromptLength 
           ? enhancedPrompt.substring(0, maxPromptLength - 3) + '...'
           : enhancedPrompt;
@@ -537,8 +628,13 @@ export async function generateVideo(
             
             // Optional parameters - image (reference image)
             if (options.image) {
-              modelInput.image = options.image;
-              console.log(`[REPLICATE] Adding image parameter for Veo 3 Fast: ${options.image}`);
+              const preparedImageUrl = await prepareImageUrlForReplicate(options.image, 'image');
+              if (preparedImageUrl) {
+                modelInput.image = preparedImageUrl;
+                console.log(`[REPLICATE] Adding image parameter for Veo 3 Fast: ${preparedImageUrl.substring(0, 100)}...`);
+              } else {
+                console.warn(`[REPLICATE] Skipping image parameter for Veo 3 Fast - URL validation/conversion failed: ${options.image.substring(0, 100)}`);
+              }
             }
             
             // Optional parameters - negative_prompt
@@ -598,8 +694,13 @@ export async function generateVideo(
             
             // Sora-2 and Sora-2 Pro support input_reference (image URL for first frame)
             if (options.image) {
-              modelInput.input_reference = options.image;
-              console.log(`[REPLICATE] Adding input_reference parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${options.image}`);
+              const preparedImageUrl = await prepareImageUrlForReplicate(options.image, 'image');
+              if (preparedImageUrl) {
+                modelInput.input_reference = preparedImageUrl;
+                console.log(`[REPLICATE] Adding input_reference parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${preparedImageUrl.substring(0, 100)}...`);
+              } else {
+                console.warn(`[REPLICATE] Skipping input_reference parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'} - URL validation/conversion failed: ${options.image.substring(0, 100)}`);
+              }
             }
             
             // Sora-2 Pro specific: resolution parameter ("standard" or "high")
@@ -644,8 +745,13 @@ export async function generateVideo(
             
             // Optional parameters - image (reference image)
             if (options.image) {
-              modelInput.image = options.image;
-              console.log(`[REPLICATE] Adding image parameter for Veo 3: ${options.image}`);
+              const preparedImageUrl = await prepareImageUrlForReplicate(options.image, 'image');
+              if (preparedImageUrl) {
+                modelInput.image = preparedImageUrl;
+                console.log(`[REPLICATE] Adding image parameter for Veo 3: ${preparedImageUrl.substring(0, 100)}...`);
+              } else {
+                console.warn(`[REPLICATE] Skipping image parameter for Veo 3 - URL validation/conversion failed: ${options.image.substring(0, 100)}`);
+              }
             }
             
             // Optional parameters - negative_prompt
@@ -664,8 +770,13 @@ export async function generateVideo(
             if (isVeo31) {
               // Veo 3.1 supports last_frame for video continuation
               if (options.lastFrame) {
-                modelInput.last_frame = options.lastFrame;
-                console.log(`[REPLICATE] Adding last_frame parameter for Veo 3.1: ${options.lastFrame}`);
+                const preparedLastFrameUrl = await prepareImageUrlForReplicate(options.lastFrame, 'lastFrame');
+                if (preparedLastFrameUrl) {
+                  modelInput.last_frame = preparedLastFrameUrl;
+                  console.log(`[REPLICATE] Adding last_frame parameter for Veo 3.1: ${preparedLastFrameUrl.substring(0, 100)}...`);
+                } else {
+                  console.warn(`[REPLICATE] Skipping last_frame parameter for Veo 3.1 - URL validation/conversion failed: ${options.lastFrame.substring(0, 100)}`);
+                }
               }
               
               // Veo 3.1 supports reference_images (array of URLs)
@@ -695,8 +806,13 @@ export async function generateVideo(
             
             // Optional parameters - start_image (first frame)
             if (options.image) {
-              modelInput.start_image = options.image;
-              console.log(`[REPLICATE] Adding start_image parameter for Kling: ${options.image}`);
+              const preparedImageUrl = await prepareImageUrlForReplicate(options.image, 'image');
+              if (preparedImageUrl) {
+                modelInput.start_image = preparedImageUrl;
+                console.log(`[REPLICATE] Adding start_image parameter for Kling: ${preparedImageUrl.substring(0, 100)}...`);
+              } else {
+                console.warn(`[REPLICATE] Skipping start_image parameter for Kling - URL validation/conversion failed: ${options.image.substring(0, 100)}`);
+              }
             }
             
             // Optional parameters - negative_prompt

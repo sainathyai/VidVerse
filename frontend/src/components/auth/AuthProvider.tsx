@@ -40,7 +40,56 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     checkUser();
-  }, []);
+    
+    // Set up periodic token expiration check (every 30 seconds)
+    const tokenCheckInterval = setInterval(() => {
+      const accessToken = localStorage.getItem('cognito_access_token');
+      if (accessToken) {
+        try {
+          const payload = JSON.parse(atob(accessToken.split('.')[1]));
+          // Check if token is expired or will expire in the next minute
+          if (payload.exp * 1000 <= (Date.now() + 60 * 1000)) {
+            // Token expired or about to expire, log out user
+            localStorage.removeItem('cognito_access_token');
+            localStorage.removeItem('cognito_id_token');
+            localStorage.removeItem('cognito_refresh_token');
+            localStorage.removeItem('cognito_user');
+            setUser(null);
+            // Redirect to login page
+            if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+              window.location.href = '/login';
+            }
+          }
+        } catch (error) {
+          // Error decoding token, treat as invalid
+          localStorage.removeItem('cognito_access_token');
+          localStorage.removeItem('cognito_id_token');
+          localStorage.removeItem('cognito_refresh_token');
+          localStorage.removeItem('cognito_user');
+          setUser(null);
+          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+            window.location.href = '/login';
+          }
+        }
+      } else {
+        // No token found, check if user state needs to be cleared
+        const currentUser = localStorage.getItem('cognito_user');
+        if (currentUser) {
+          // Token missing but user data exists, clear it
+          localStorage.removeItem('cognito_user');
+          setUser(null);
+          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+            window.location.href = '/login';
+          }
+        }
+      }
+    }, 30000); // Check every 30 seconds
+    
+    return () => {
+      clearInterval(tokenCheckInterval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
 
   const checkUser = async () => {
     try {
@@ -50,32 +99,66 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const userStr = localStorage.getItem('cognito_user');
 
       if (accessToken && idToken) {
-        // User is authenticated via backend OAuth
-        if (userStr) {
-          try {
-            const userInfo = JSON.parse(userStr);
+        // Validate token expiration
+        try {
+          const accessPayload = JSON.parse(atob(accessToken.split('.')[1]));
+          const idPayload = JSON.parse(atob(idToken.split('.')[1]));
+          
+          // Check if access token is expired
+          const isAccessTokenExpired = accessPayload.exp * 1000 <= Date.now();
+          // Check if ID token is expired (with 5 minute buffer for safety)
+          const isIdTokenExpired = idPayload.exp * 1000 <= (Date.now() + 5 * 60 * 1000);
+          
+          if (isAccessTokenExpired || isIdTokenExpired) {
+            // Tokens expired, clear everything and redirect to login
+            localStorage.removeItem('cognito_access_token');
+            localStorage.removeItem('cognito_id_token');
+            localStorage.removeItem('cognito_refresh_token');
+            localStorage.removeItem('cognito_user');
+            setUser(null);
+            // Redirect to login page
+            if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+              window.location.href = '/login';
+            }
+            return;
+          }
+          
+          // Tokens are valid, set user
+          if (userStr) {
+            try {
+              const userInfo = JSON.parse(userStr);
+              setUser({
+                userId: userInfo.sub || userInfo.user_id || '',
+                username: userInfo.email || userInfo.username || '',
+                email: userInfo.email,
+              });
+            } catch (e) {
+              // Fallback: decode ID token to get user info
+              setUser({
+                userId: idPayload.sub || '',
+                username: idPayload.email || idPayload['cognito:username'] || '',
+                email: idPayload.email,
+              });
+            }
+          } else {
+            // Decode ID token to get user info
             setUser({
-              userId: userInfo.sub || userInfo.user_id || '',
-              username: userInfo.email || userInfo.username || '',
-              email: userInfo.email,
-            });
-          } catch (e) {
-            // Fallback: decode ID token to get user info
-            const payload = JSON.parse(atob(idToken.split('.')[1]));
-            setUser({
-              userId: payload.sub || '',
-              username: payload.email || payload['cognito:username'] || '',
-              email: payload.email,
+              userId: idPayload.sub || '',
+              username: idPayload.email || idPayload['cognito:username'] || '',
+              email: idPayload.email,
             });
           }
-        } else {
-          // Decode ID token to get user info
-          const payload = JSON.parse(atob(idToken.split('.')[1]));
-          setUser({
-            userId: payload.sub || '',
-            username: payload.email || payload['cognito:username'] || '',
-            email: payload.email,
-          });
+        } catch (decodeError) {
+          // Error decoding tokens, treat as invalid
+          localStorage.removeItem('cognito_access_token');
+          localStorage.removeItem('cognito_id_token');
+          localStorage.removeItem('cognito_refresh_token');
+          localStorage.removeItem('cognito_user');
+          setUser(null);
+          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+            window.location.href = '/login';
+          }
+          return;
         }
       } else if (import.meta.env.VITE_COGNITO_USER_POOL_ID) {
         // Fallback to Amplify if configured
@@ -292,14 +375,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (payload.exp * 1000 > Date.now()) {
           return accessToken;
         } else {
-          // Token expired, remove it
+          // Token expired, remove it and user data
           localStorage.removeItem('cognito_access_token');
           localStorage.removeItem('cognito_id_token');
           localStorage.removeItem('cognito_refresh_token');
+          localStorage.removeItem('cognito_user');
+          setUser(null);
+          // Redirect to login if not already there
+          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+            window.location.href = '/login';
+          }
         }
       } catch (error) {
         // Error decoding, treat as invalid
         localStorage.removeItem('cognito_access_token');
+        localStorage.removeItem('cognito_id_token');
+        localStorage.removeItem('cognito_refresh_token');
+        localStorage.removeItem('cognito_user');
+        setUser(null);
+        if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+          window.location.href = '/login';
+        }
       }
     }
 

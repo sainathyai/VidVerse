@@ -21,6 +21,9 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Install ffmpeg/ffprobe for video processing (needed for frame extraction)
+RUN apk add --no-cache ffmpeg
+
 # Install production dependencies only
 COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force

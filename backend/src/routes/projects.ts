@@ -20,6 +20,7 @@ const createProjectSchema = z.object({
   pacing: z.string().optional(),
   videoModelId: z.string().optional(),
   imageModelId: z.string().optional(),
+  useReferenceFrame: z.boolean().optional(),
   mode: z.enum(['classic', 'agentic']).default('classic'),
   audioUrl: z.string().url().optional(), // Store uploaded audio URL
 });
@@ -48,6 +49,7 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
           audioUrl: { type: 'string' },
           videoModelId: { type: 'string' },
           imageModelId: { type: 'string' },
+          useReferenceFrame: { type: 'boolean' },
         },
       },
       response: {
@@ -122,6 +124,7 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
           pacing: data.pacing,
           videoModelId: data.videoModelId,
           imageModelId: data.imageModelId,
+          useReferenceFrame: data.useReferenceFrame !== undefined ? data.useReferenceFrame : false, // Default to false (user must opt-in)
           audioUrl: data.audioUrl,
         }),
       ]
@@ -476,8 +479,8 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
             };
             
             // Merge in params from dropdown (config)
-            if (config.style) parsedPrompt.style = config.style;
-            if (config.mood) parsedPrompt.mood = config.mood;
+      if (config.style) parsedPrompt.style = config.style;
+      if (config.mood) parsedPrompt.mood = config.mood;
             if (config.aspectRatio) parsedPrompt.aspectRatio = config.aspectRatio;
             if (config.colorPalette) parsedPrompt.colorPalette = config.colorPalette;
             if (config.pacing) parsedPrompt.pacing = config.pacing;
@@ -504,7 +507,7 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
             parsedPrompt.keywords = keywords.length > 0 ? keywords : undefined;
             
             const scriptJson = {
-              overallPrompt: projectData.prompt,
+        overallPrompt: projectData.prompt,
               parsedPrompt: parsedPrompt,
               scenes: scenesWithTiming,
             };
@@ -644,24 +647,49 @@ CRITICAL INSTRUCTIONS:
 7. List all extracted key elements in the "keyElements" array in parsedPrompt so they can be referenced consistently across all scenes.`;
 
       // Call OpenRouter API with Claude Sonnet 4.5
-      const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${appConfig.openrouter.apiKey}`,
-          'HTTP-Referer': appConfig.app.frontendUrl || 'https://vidverseai.com',
-          'X-Title': 'VidVerse AI Script Generator',
-        },
-        body: JSON.stringify({
-          model: 'anthropic/claude-4.5-sonnet',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature: 0.8,
-          max_tokens: 16000, // Allow for 10,000+ word responses
-        }),
-      });
+      // Add timeout to prevent hanging (5 minutes for large script generation)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 minutes timeout
+      
+      fastify.log.info({ projectId, promptLength: userPrompt.length }, 'Calling OpenRouter API for script generation');
+      
+      let openrouterResponse: Response;
+      try {
+        openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${appConfig.openrouter.apiKey}`,
+            'HTTP-Referer': appConfig.app.frontendUrl || 'https://vidverseai.com',
+            'X-Title': 'VidVerse AI Script Generator',
+          },
+          body: JSON.stringify({
+            model: 'anthropic/claude-3.5-sonnet', // Updated to correct model name
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            temperature: 0.8,
+            max_tokens: 32000, // Dramatically increased to allow for very elaborate scripts (20,000+ words)
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError') {
+          fastify.log.error({ projectId }, 'OpenRouter API request timed out after 5 minutes');
+          return reply.code(504).send({
+            error: 'Script generation timed out',
+            message: 'The script generation request took too long. Please try again with a shorter prompt or reduce the duration.',
+          });
+        }
+        fastify.log.error({ projectId, error: fetchError.message }, 'OpenRouter API fetch failed');
+        return reply.code(502).send({
+          error: 'Script generation failed',
+          message: `Failed to connect to AI service: ${fetchError.message}`,
+        });
+      }
 
       if (!openrouterResponse.ok) {
         const errorText = await openrouterResponse.text();
@@ -709,6 +737,82 @@ CRITICAL INSTRUCTIONS:
 
       fastify.log.info({ projectId, responseLength: aiResponse.length }, 'Received AI response, parsing JSON');
 
+      // Helper function to clean and fix JSON strings with control characters
+      const cleanJsonString = (jsonString: string): string => {
+        // First, try to extract JSON from markdown code blocks if present
+        const jsonMatch = jsonString.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+        let jsonToClean = jsonMatch ? jsonMatch[1] : jsonString;
+        
+        // Try to find JSON object boundaries if not in code block
+        if (!jsonMatch) {
+          const jsonObjectMatch = jsonString.match(/\{[\s\S]*\}/);
+          if (jsonObjectMatch) {
+            jsonToClean = jsonObjectMatch[0];
+          }
+        }
+        
+        // Fix control characters in JSON string values
+        // Process character by character to properly handle escaped sequences
+        let cleaned = '';
+        let inString = false;
+        let escapeNext = false;
+        
+        for (let i = 0; i < jsonToClean.length; i++) {
+          const char = jsonToClean[i];
+          const charCode = char.charCodeAt(0);
+          
+          if (escapeNext) {
+            // This character is escaped, keep it as-is
+            cleaned += char;
+            escapeNext = false;
+            continue;
+          }
+          
+          if (char === '\\') {
+            // Next character is escaped
+            escapeNext = true;
+            cleaned += char;
+            continue;
+          }
+          
+          if (char === '"') {
+            // Toggle string state
+            inString = !inString;
+            cleaned += char;
+            continue;
+          }
+          
+          if (inString) {
+            // We're inside a string value
+            // Escape control characters (0x00-0x1F except already escaped ones)
+            if (charCode >= 0x00 && charCode <= 0x1F) {
+              // Map control characters to their escape sequences
+              const escapeMap: Record<number, string> = {
+                0x08: '\\b',  // Backspace
+                0x09: '\\t',  // Tab
+                0x0A: '\\n',  // Newline
+                0x0C: '\\f',  // Form feed
+                0x0D: '\\r',  // Carriage return
+              };
+              
+              if (escapeMap[charCode]) {
+                cleaned += escapeMap[charCode];
+              } else {
+                // Use Unicode escape for other control characters
+                cleaned += `\\u${charCode.toString(16).padStart(4, '0')}`;
+              }
+            } else {
+              cleaned += char;
+            }
+          } else {
+            // Outside string, keep as-is
+            cleaned += char;
+          }
+        }
+        
+        return cleaned;
+      };
+
       // Try to extract JSON from the response (it might be wrapped in markdown code blocks)
       let scriptJson: any;
       try {
@@ -716,42 +820,77 @@ CRITICAL INSTRUCTIONS:
         scriptJson = JSON.parse(aiResponse);
         fastify.log.info({ projectId }, 'Successfully parsed JSON directly from AI response');
       } catch (parseError: any) {
-        fastify.log.warn({ projectId, parseError: parseError.message }, 'Direct JSON parse failed, trying markdown extraction');
-        // Try to extract JSON from markdown code blocks
-        const jsonMatch = aiResponse.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-        if (jsonMatch && jsonMatch[1]) {
-          try {
-            scriptJson = JSON.parse(jsonMatch[1]);
-            fastify.log.info({ projectId }, 'Successfully parsed JSON from markdown code block');
-          } catch (e: any) {
-            fastify.log.warn({ projectId, error: e.message }, 'Markdown extraction failed, trying regex match');
-            // If still fails, try to find JSON object in the text
-            const jsonObjectMatch = aiResponse.match(/\{[\s\S]*\}/);
-            if (jsonObjectMatch) {
-              try {
-                scriptJson = JSON.parse(jsonObjectMatch[0]);
-                fastify.log.info({ projectId }, 'Successfully parsed JSON using regex match');
-              } catch (regexError: any) {
-                fastify.log.error({ projectId, error: regexError.message, responsePreview: aiResponse.substring(0, 500) }, 'Failed to parse JSON from AI response');
+        fastify.log.warn({ projectId, parseError: parseError.message }, 'Direct JSON parse failed, trying to clean and fix JSON');
+        
+        try {
+          // Clean the JSON string to fix control characters
+          const cleanedJson = cleanJsonString(aiResponse);
+          scriptJson = JSON.parse(cleanedJson);
+          fastify.log.info({ projectId }, 'Successfully parsed JSON after cleaning control characters');
+        } catch (cleanError: any) {
+          fastify.log.warn({ projectId, error: cleanError.message }, 'Cleaned JSON parse failed, trying markdown extraction');
+          
+          // Try to extract JSON from markdown code blocks
+          const jsonMatch = aiResponse.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+          if (jsonMatch && jsonMatch[1]) {
+            try {
+              const cleanedMarkdown = cleanJsonString(jsonMatch[1]);
+              scriptJson = JSON.parse(cleanedMarkdown);
+              fastify.log.info({ projectId }, 'Successfully parsed JSON from markdown code block after cleaning');
+            } catch (e: any) {
+              fastify.log.warn({ projectId, error: e.message }, 'Markdown extraction failed, trying regex match with cleaning');
+              
+              // If still fails, try to find JSON object in the text and clean it
+              const jsonObjectMatch = aiResponse.match(/\{[\s\S]*\}/);
+              if (jsonObjectMatch) {
+                try {
+                  const cleanedObject = cleanJsonString(jsonObjectMatch[0]);
+                  scriptJson = JSON.parse(cleanedObject);
+                  fastify.log.info({ projectId }, 'Successfully parsed JSON using regex match after cleaning');
+                } catch (regexError: any) {
+                  fastify.log.error({ 
+                    projectId, 
+                    error: regexError.message, 
+                    position: regexError.message.match(/position (\d+)/)?.[1],
+                    responsePreview: aiResponse.substring(0, 1000) 
+                  }, 'Failed to parse JSON from AI response after all cleaning attempts');
+                  
+                  // Try one more time with a more aggressive cleaning approach
+                  try {
+                    // Remove all control characters except those that are properly escaped
+                    let aggressiveClean = jsonObjectMatch[0];
+                    // Replace unescaped newlines, tabs, etc. in string values
+                    aggressiveClean = aggressiveClean.replace(/(?<!\\)"(?:[^"\\]|\\.)*"/g, (match) => {
+                      return match
+                        .replace(/\n/g, '\\n')
+                        .replace(/\r/g, '\\r')
+                        .replace(/\t/g, '\\t');
+                    });
+                    scriptJson = JSON.parse(aggressiveClean);
+                    fastify.log.info({ projectId }, 'Successfully parsed JSON using aggressive cleaning');
+                  } catch (finalError: any) {
+                    fastify.log.error({ projectId, error: finalError.message }, 'All JSON parsing attempts failed');
+                    return reply.code(502).send({
+                      error: 'Failed to parse script JSON',
+                      message: `Could not extract valid JSON from AI response. The response may contain invalid control characters. Error: ${finalError.message}`,
+                    });
+                  }
+                }
+              } else {
+                fastify.log.error({ projectId, responsePreview: aiResponse.substring(0, 500) }, 'No JSON object found in AI response');
                 return reply.code(502).send({
-                  error: 'Failed to parse script JSON',
-                  message: `Could not extract valid JSON from AI response: ${regexError.message}`,
+                  error: 'Invalid script format',
+                  message: 'Could not extract JSON from AI response. The response may not contain valid JSON.',
                 });
               }
-            } else {
-              fastify.log.error({ projectId, responsePreview: aiResponse.substring(0, 500) }, 'No JSON object found in AI response');
-              return reply.code(502).send({
-                error: 'Invalid script format',
-                message: 'Could not extract JSON from AI response. The response may not contain valid JSON.',
-              });
             }
+          } else {
+            fastify.log.error({ projectId, parseError: parseError.message, responsePreview: aiResponse.substring(0, 500) }, 'Failed to parse JSON and no markdown code block found');
+            return reply.code(502).send({
+              error: 'Failed to parse script JSON',
+              message: `Could not parse JSON from AI response: ${parseError.message}`,
+            });
           }
-        } else {
-          fastify.log.error({ projectId, parseError: parseError.message, responsePreview: aiResponse.substring(0, 500) }, 'Failed to parse JSON and no markdown code block found');
-          return reply.code(502).send({
-            error: 'Failed to parse script JSON',
-            message: `Could not parse JSON from AI response: ${parseError.message}`,
-          });
         }
       }
 
@@ -809,10 +948,23 @@ CRITICAL INSTRUCTIONS:
           id: { type: 'string', format: 'uuid' },
         },
       },
+      body: {
+        type: 'object',
+        properties: {
+          useReferenceFrame: { type: 'boolean' },
+          videoModelId: { type: 'string' },
+          aspectRatio: { type: 'string' },
+          style: { type: 'string' },
+          mood: { type: 'string' },
+          colorPalette: { type: 'string' },
+          pacing: { type: 'string' },
+        },
+      },
     },
-  }, async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+  }, async (request: FastifyRequest<{ Params: { id: string }; Body?: { useReferenceFrame?: boolean; videoModelId?: string; aspectRatio?: string; style?: string; mood?: string; colorPalette?: string; pacing?: string } }>, reply: FastifyReply) => {
     const user = getCognitoUser(request);
     const { id: projectId } = request.params;
+    const requestBody = request.body || {};
 
     // Verify project belongs to user
     const projectData = await queryOne(
@@ -824,10 +976,35 @@ CRITICAL INSTRUCTIONS:
       return reply.code(404).send({ error: 'Project not found' });
     }
 
-    // Parse config
-    const config = typeof projectData.config === 'string' 
+    // Parse config from database
+    const dbConfig = typeof projectData.config === 'string' 
       ? JSON.parse(projectData.config) 
       : (projectData.config || {});
+
+    // Merge request body values with database config (request body overrides database config)
+    const config = {
+      ...dbConfig,
+      // Override with request body values if provided
+      ...(requestBody.useReferenceFrame !== undefined && { useReferenceFrame: requestBody.useReferenceFrame }),
+      ...(requestBody.videoModelId !== undefined && { videoModelId: requestBody.videoModelId }),
+      ...(requestBody.aspectRatio !== undefined && { aspectRatio: requestBody.aspectRatio }),
+      ...(requestBody.style !== undefined && { style: requestBody.style }),
+      ...(requestBody.mood !== undefined && { mood: requestBody.mood }),
+      ...(requestBody.colorPalette !== undefined && { colorPalette: requestBody.colorPalette }),
+      ...(requestBody.pacing !== undefined && { pacing: requestBody.pacing }),
+    };
+
+    // Log config values for debugging
+    fastify.log.info({ 
+      projectId, 
+      requestBodyUseReferenceFrame: requestBody.useReferenceFrame,
+      dbConfigUseReferenceFrame: dbConfig.useReferenceFrame,
+      finalConfigUseReferenceFrame: config.useReferenceFrame,
+      useReferenceFrameType: typeof config.useReferenceFrame,
+      videoModelId: config.videoModelId,
+      aspectRatio: config.aspectRatio,
+      requestBodyKeys: Object.keys(requestBody),
+    }, 'Parsed project config values (merged from DB and request body)');
 
     // Import video generation functions
     const { parsePrompt } = await import('../services/promptParser');
@@ -1067,30 +1244,30 @@ CRITICAL INSTRUCTIONS:
         }, 'Step 1-2: Script parsed successfully');
       } else {
         // Normal flow: parse prompt and plan scenes
-        fastify.log.info({ projectId, promptLength: projectData.prompt?.length || 0 }, 'Step 1: Parsing prompt');
+      fastify.log.info({ projectId, promptLength: projectData.prompt?.length || 0 }, 'Step 1: Parsing prompt');
         const parsedPrompt = parsePrompt(projectData.prompt, videoDuration);
-        if (config.style) parsedPrompt.style = config.style;
-        if (config.mood) parsedPrompt.mood = config.mood;
+      if (config.style) parsedPrompt.style = config.style;
+      if (config.mood) parsedPrompt.mood = config.mood;
         scriptParsedPrompt = parsedPrompt;
         
-        fastify.log.info({ 
-          projectId, 
-          parsedStyle: parsedPrompt.style,
-          parsedMood: parsedPrompt.mood,
-          keywordsCount: parsedPrompt.keywords?.length || 0,
-        }, 'Step 1: Prompt parsed successfully');
+      fastify.log.info({ 
+        projectId, 
+        parsedStyle: parsedPrompt.style,
+        parsedMood: parsedPrompt.mood,
+        keywordsCount: parsedPrompt.keywords?.length || 0,
+      }, 'Step 1: Prompt parsed successfully');
 
         fastify.log.info({ projectId, duration: videoDuration }, 'Step 2: Planning scenes');
         scenes = planScenes(projectData.prompt, parsedPrompt, videoDuration);
-        fastify.log.info({ 
-          projectId, 
-          sceneCount: scenes.length,
-          scenes: scenes.map(s => ({ 
-            number: s.sceneNumber, 
-            duration: s.duration, 
-            promptLength: s.prompt?.length || 0 
-          })),
-        }, 'Step 2: Scenes planned successfully');
+      fastify.log.info({ 
+        projectId, 
+        sceneCount: scenes.length,
+        scenes: scenes.map(s => ({ 
+          number: s.sceneNumber, 
+          duration: s.duration, 
+          promptLength: s.prompt?.length || 0 
+        })),
+      }, 'Step 2: Scenes planned successfully');
       }
 
       // 3. Generate videos for each scene
@@ -1137,24 +1314,53 @@ CRITICAL INSTRUCTIONS:
           };
           
           // Use last frame from previous scene as reference for smooth transitions
-          // For Veo 3.1, use lastFrame parameter; for other models, use image parameter
+          // Only if useReferenceFrame is enabled (defaults to false - user must opt-in)
+          // Handle both boolean true and string "true" values (JSON parsing can sometimes return strings)
+          const useReferenceFrameValue = config.useReferenceFrame;
+          const shouldUseReferenceFrame = useReferenceFrameValue === true || useReferenceFrameValue === 'true' || useReferenceFrameValue === 1;
+          
+          fastify.log.info({ 
+            projectId,
+            sceneNumber: scene.sceneNumber,
+            useReferenceFrameValue,
+            useReferenceFrameType: typeof useReferenceFrameValue,
+            shouldUseReferenceFrame,
+            hasPreviousFrame: !!previousSceneLastFrameUrl,
+            isFirstScene: i === 0,
+          }, `Step 3.${i + 1}: Reference frame check - useReferenceFrame=${useReferenceFrameValue} (type: ${typeof useReferenceFrameValue}), shouldUse=${shouldUseReferenceFrame}`);
+          
+          // Explicitly ensure reference frame parameters are not included when disabled
           if (previousSceneLastFrameUrl && i > 0) {
-            if (selectedVideoModelId === 'google/veo-3.1') {
-              videoGenOptions.lastFrame = previousSceneLastFrameUrl;
-              fastify.log.info({ 
-                projectId, 
-                sceneNumber: scene.sceneNumber,
-                lastFrameUrl: previousSceneLastFrameUrl,
-              }, `Step 3.${i + 1}: Using last frame from scene ${i} as reference for Veo 3.1`);
+            if (shouldUseReferenceFrame) {
+              if (selectedVideoModelId === 'google/veo-3.1') {
+                videoGenOptions.lastFrame = previousSceneLastFrameUrl;
+                fastify.log.info({ 
+                  projectId, 
+                  sceneNumber: scene.sceneNumber,
+                  lastFrameUrl: previousSceneLastFrameUrl,
+                }, `Step 3.${i + 1}: Using last frame from scene ${i} as reference for Veo 3.1`);
+              } else {
+                // For other models (Veo 3, Veo 3 Fast, Sora 2, Kling), use image parameter
+                videoGenOptions.image = previousSceneLastFrameUrl;
+                fastify.log.info({ 
+                  projectId, 
+                  sceneNumber: scene.sceneNumber,
+                  referenceImageUrl: previousSceneLastFrameUrl,
+                }, `Step 3.${i + 1}: Using last frame from scene ${i} as reference image`);
+              }
             } else {
-              // For other models (Veo 3, Veo 3 Fast, Sora 2, Kling), use image parameter
-              videoGenOptions.image = previousSceneLastFrameUrl;
+              // Explicitly ensure these are not set when useReferenceFrame is false
+              delete videoGenOptions.lastFrame;
+              delete videoGenOptions.image;
               fastify.log.info({ 
                 projectId, 
                 sceneNumber: scene.sceneNumber,
-                referenceImageUrl: previousSceneLastFrameUrl,
-              }, `Step 3.${i + 1}: Using last frame from scene ${i} as reference image`);
+              }, `Step 3.${i + 1}: Skipping reference frame (useReferenceFrame disabled) - not including in Replicate API call`);
             }
+          } else {
+            // Ensure these are not set for first scene or when no previous frame exists
+            delete videoGenOptions.lastFrame;
+            delete videoGenOptions.image;
           }
           
           // Generate video for scene with all params from script and dropdown

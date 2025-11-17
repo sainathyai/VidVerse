@@ -4,7 +4,7 @@ import { config } from '../config';
 import { z } from 'zod';
 
 const chatMessageSchema = z.object({
-  message: z.string().min(1).max(5000),
+  message: z.string().min(1).max(50000), // Increased to 50000 characters for very long messages
   projectId: z.string().uuid().optional(),
   conversationId: z.string().optional(),
   model: z.string().optional(),
@@ -41,7 +41,7 @@ export async function chatRoutes(fastify: FastifyInstance, options: FastifyPlugi
         type: 'object',
         required: ['message'],
           properties: {
-            message: { type: 'string', minLength: 1, maxLength: 5000 },
+            message: { type: 'string', minLength: 1, maxLength: 50000 }, // Increased to 50000 characters
             projectId: { type: 'string', format: 'uuid' },
             conversationId: { type: 'string' },
             model: { type: 'string' },
@@ -233,7 +233,7 @@ CRITICAL: Review the conversation history and project context before asking any 
           model: data.model || config.openrouter.model || 'openai/gpt-4o-mini',
           messages: messages,
           temperature: 0.8, // Slightly higher for more creative and conversational responses
-          max_tokens: 2500, // Increased for longer, more detailed responses
+          max_tokens: 16000, // Dramatically increased for very long, detailed responses
         }),
       });
 
