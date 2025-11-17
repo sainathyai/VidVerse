@@ -416,9 +416,44 @@ export async function generateVideo(
           const isVeo3 = model.id === 'google/veo-3' || model.id === 'google/veo-3.1';
           
           if (isVeo3Fast) {
-            // Veo 3 Fast format: prompt and enhance_prompt (boolean)
-            modelInput.enhance_prompt = true; // Default to true, can be made configurable later
-            console.log(`[REPLICATE] Adding Veo 3 Fast parameters: enhance_prompt=${modelInput.enhance_prompt}`);
+            // Veo 3 Fast format: prompt, aspect_ratio, duration, resolution, generate_audio, image, negative_prompt, seed, enhance_prompt
+            // Normalize aspect ratio to "W:H" format (e.g., "16:9", "9:16", "1:1")
+            let veoFastAspectRatio: string;
+            if (aspectRatio) {
+              const normalizedAspectRatio = aspectRatio.includes(':') 
+                ? aspectRatio 
+                : convertAspectRatioToRatio(aspectRatio);
+              veoFastAspectRatio = normalizedAspectRatio || '16:9';
+            } else {
+              veoFastAspectRatio = '16:9'; // Default to 16:9 landscape
+            }
+            
+            // Required parameters
+            modelInput.aspect_ratio = veoFastAspectRatio;
+            modelInput.duration = Math.min(duration, 60); // Veo supports up to 60 seconds
+            modelInput.resolution = '1080p'; // Default to 1080p
+            modelInput.generate_audio = true; // Default to true
+            modelInput.enhance_prompt = true; // Default to true (Veo 3 Fast specific)
+            
+            // Optional parameters - image (reference image)
+            if (options.image) {
+              modelInput.image = options.image;
+              console.log(`[REPLICATE] Adding image parameter for Veo 3 Fast: ${options.image}`);
+            }
+            
+            // Optional parameters - negative_prompt
+            if (options.negativePrompt) {
+              modelInput.negative_prompt = options.negativePrompt;
+              console.log(`[REPLICATE] Adding negative_prompt parameter for Veo 3 Fast`);
+            }
+            
+            // Optional parameters - seed
+            if (options.seed !== undefined && options.seed !== null) {
+              modelInput.seed = options.seed;
+              console.log(`[REPLICATE] Adding seed parameter for Veo 3 Fast: ${options.seed}`);
+            }
+            
+            console.log(`[REPLICATE] Adding Veo 3 Fast parameters: aspect_ratio=${veoFastAspectRatio}, duration=${modelInput.duration}, resolution=${modelInput.resolution}, generate_audio=${modelInput.generate_audio}, enhance_prompt=${modelInput.enhance_prompt}`);
           } else if (isSora2) {
             // Sora-2 format: aspect_ratio as "portrait" or "landscape", seconds as 4/8/12
             let soraAspectRatio: string;
