@@ -406,26 +406,45 @@ export async function generateVideo(
           };
           
           // Add aspect_ratio parameter ONLY for models that support it (e.g., Sora-2)
-          // Sora-2 accepts aspect_ratio parameter (e.g., "16:9", "9:16", "1:1", "21:9", "4:3")
+          // Sora-2 accepts aspect_ratio as "portrait" (720x1280) or "landscape" (1280x720)
           // Only add aspect_ratio for Sora-2, not for other models
           const supportsAspectRatio = model.id === 'openai/sora-2';
           
           if (supportsAspectRatio) {
+            // Convert aspect ratio to Sora-2 format: "portrait" or "landscape"
+            let soraAspectRatio: string;
             if (aspectRatio) {
-              // Normalize aspect ratio format (ensure it's in "W:H" format)
+              // Normalize aspect ratio format first
               const normalizedAspectRatio = aspectRatio.includes(':') 
                 ? aspectRatio 
                 : convertAspectRatioToRatio(aspectRatio);
               
+              // Convert to Sora-2 format: "portrait" or "landscape"
               if (normalizedAspectRatio) {
-                modelInput.aspect_ratio = normalizedAspectRatio;
-                console.log(`[REPLICATE] Adding aspect_ratio parameter: ${normalizedAspectRatio}`);
+                // Check if it's portrait (height > width) or landscape (width >= height)
+                const [width, height] = normalizedAspectRatio.split(':').map(Number);
+                soraAspectRatio = height > width ? 'portrait' : 'landscape';
+              } else {
+                // Default to landscape if conversion fails
+                soraAspectRatio = 'landscape';
               }
             } else {
-              // Default to 16:9 landscape for Sora-2 if not specified
-              modelInput.aspect_ratio = '16:9';
-              console.log(`[REPLICATE] Using default aspect_ratio: 16:9 for Sora-2`);
+              // Default to landscape if not specified
+              soraAspectRatio = 'landscape';
             }
+            
+            modelInput.aspect_ratio = soraAspectRatio;
+            console.log(`[REPLICATE] Adding aspect_ratio parameter for Sora-2: ${soraAspectRatio}`);
+            
+            // Sora-2 also requires "seconds" parameter (4, 8, or 12)
+            // Round duration to nearest valid value
+            const validSeconds = [4, 8, 12];
+            const requestedSeconds = Math.min(duration, 12);
+            const soraSeconds = validSeconds.reduce((prev, curr) => 
+              Math.abs(curr - requestedSeconds) < Math.abs(prev - requestedSeconds) ? curr : prev
+            );
+            modelInput.seconds = soraSeconds;
+            console.log(`[REPLICATE] Setting seconds parameter for Sora-2: ${soraSeconds} (requested: ${duration})`);
           } else if (aspectRatio) {
             // For other models, log that aspect_ratio is not supported
             console.log(`[REPLICATE] Model ${model.id} does not support aspect_ratio parameter, ignoring`);
