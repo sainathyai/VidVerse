@@ -30,45 +30,27 @@ const MODEL_CACHE_TTL = 3600000; // 1 hour in milliseconds
 
 // Model pricing tiers (cost per second based on Replicate pricing - manually verified)
 const MODEL_PRICING: Record<string, { costPerSecond: number; tier: VideoModel['tier'] }> = {
-    // Budget tier ($0.00 - $0.03/sec)
-    'bytedance/seedance-1-pro-fast': { costPerSecond: 0.03, tier: 'budget' }, // Fast variant: $0.03/sec (cheapest for budget)
-    'bytedance/seedance-1-pro': { costPerSecond: 0.03, tier: 'budget' }, // 480p: $0.03/sec
-    'luma/dream-machine': { costPerSecond: 0.03, tier: 'budget' }, // ~$0.03/sec
-    'anotherjesse/zeroscope-v2-xl': { costPerSecond: 0.02, tier: 'budget' }, // ~$0.02/sec
-    
-    // Economy tier ($0.03 - $0.10/sec)
-    'wan-video/wan-2.5-i2v': { costPerSecond: 0.05, tier: 'economy' }, // 480p: $0.05/sec
-    'luma/ray': { costPerSecond: 0.05, tier: 'economy' }, // ~$0.05/sec
-    'stability-ai/stable-video-diffusion': { costPerSecond: 0.05, tier: 'economy' }, // ~$0.05/sec
-    'kwaivgi/kling-v2.5-turbo-pro': { costPerSecond: 0.07, tier: 'economy' }, // $0.07/sec
-    'deforum/deforum-stable-diffusion': { costPerSecond: 0.10, tier: 'economy' }, // ~$0.10/sec
-    
-    // Standard tier ($0.10 - $0.50/sec)
-    'wan-video/wan-2.5-i2v-720p': { costPerSecond: 0.10, tier: 'standard' }, // 720p: $0.10/sec
-    'openai/sora-2': { costPerSecond: 0.10, tier: 'standard' }, // $0.10/sec
-    'wan-video/wan-2.5-i2v-1080p': { costPerSecond: 0.15, tier: 'standard' }, // 1080p: $0.15/sec
-    'haiper-ai/haiper-video-2': { costPerSecond: 0.15, tier: 'standard' }, // ~$0.15/sec
-    'tencent/hunyuan-video': { costPerSecond: 0.20, tier: 'standard' }, // ~$0.20/sec
-    'genmoai/mochi-1': { costPerSecond: 0.25, tier: 'standard' }, // ~$0.25/sec
-    'minimax/video-01-live': { costPerSecond: 0.30, tier: 'standard' }, // ~$0.30/sec
-    
-    // Advanced tier ($0.50 - $1.00/sec)
-    'runway/gen3-alpha-turbo': { costPerSecond: 0.50, tier: 'advanced' }, // ~$0.50/sec
-    'pika/pika-1.5': { costPerSecond: 0.80, tier: 'advanced' }, // ~$0.80/sec
-    
-    // Premium tier ($1.00+/sec) - Veo 3 for premium
-    'google/veo-3.1': { costPerSecond: 0.20, tier: 'premium' }, // Veo 3 for premium tier
-    'google/veo-3.1-audio': { costPerSecond: 0.40, tier: 'premium' }, // Veo 3 with audio for premium tier
-    'runway/gen3-alpha': { costPerSecond: 1.00, tier: 'premium' }, // ~$1.00/sec
+    // Video models - Google Veo 3 series
+    'google/veo-3': { costPerSecond: 0.20, tier: 'premium' },
+    'google/veo-3.1': { costPerSecond: 0.20, tier: 'premium' },
+    'google/veo-3-fast': { costPerSecond: 0.15, tier: 'standard' },
+    'openai/sora-2': { costPerSecond: 0.10, tier: 'standard' },
   };
 
-// Cost tier to model mapping - specific models for each cost tier selection
-const COST_TIER_TO_MODEL: Record<number, string> = {
-  0.02: 'bytedance/seedance-1-pro-fast', // Budget: ByteDance (cheapest)
-  0.05: 'bytedance/seedance-1-pro-fast', // Economy: ByteDance (cheapest)
-  0.20: 'openai/sora-2', // Standard: Sora 2
-  0.50: 'openai/sora-2', // Advanced: Sora 2 (fallback to standard)
-  1.00: 'google/veo-3.1', // Premium: Veo 3
+// Model ID to display name mapping for video models
+export const VIDEO_MODEL_NAMES: Record<string, string> = {
+  'google/veo-3': 'Veo 3',
+  'google/veo-3.1': 'Veo 3.1',
+  'google/veo-3-fast': 'Veo 3 Fast',
+  'openai/sora-2': 'Sora 2',
+};
+
+// Model ID to display name mapping for image models
+export const IMAGE_MODEL_NAMES: Record<string, string> = {
+  'openai/dall-e-3': 'DALL-E 3',
+  'google/nano-banana': 'Nano Banana',
+  'google/imagen-4-ultra': 'Imagen 4 Ultra',
+  'google/imagen-4': 'Imagen 4',
 };
 
 // Cost tier thresholds
@@ -83,25 +65,25 @@ const COST_TIERS = {
 // Fallback models if API fetch fails - include models for all tiers
 const FALLBACK_VIDEO_MODELS: VideoModel[] = [
   {
-    id: 'bytedance/seedance-1-pro-fast',
-    name: 'ByteDance Seedance 1 Pro Fast',
-    description: 'Fast video generation - budget tier (cheapest)',
+    id: 'google/veo-3-fast',
+    name: 'Google Veo 3 Fast',
+    description: 'Fast video generation',
     maxDuration: 5,
-    costPerSecond: 0.03,
-    tier: 'budget',
+    costPerSecond: 0.15,
+    tier: 'standard',
   },
   {
-    id: 'openai/sora-2',
-    name: 'OpenAI Sora 2',
-    description: 'High quality video generation - standard tier',
+    id: 'google/veo-3',
+    name: 'Google Veo 3',
+    description: 'High quality video generation',
     maxDuration: 5,
-    costPerSecond: 0.10,
-    tier: 'standard',
+    costPerSecond: 0.20,
+    tier: 'premium',
   },
   {
     id: 'google/veo-3.1',
     name: 'Google Veo 3.1',
-    description: 'Premium video generation - premium tier',
+    description: 'Premium video generation',
     maxDuration: 5,
     costPerSecond: 0.20,
     tier: 'premium',
@@ -281,8 +263,24 @@ export interface VideoGenerationOptions {
   height?: number;
   fps?: number;
   numFrames?: number;
-  costPerSecond?: number; // User's selected cost tier (0.02, 0.05, 0.20, 0.50, 1.00)
+  videoModelId?: string; // Selected video model ID (e.g., 'google/veo-3.1')
   aspectRatio?: string; // Aspect ratio string like "16:9", "9:16", "1:1", etc.
+}
+
+export interface ImageGenerationOptions {
+  prompt: string;
+  imageModelId?: string; // Selected image model ID (e.g., 'openai/dall-e-3')
+  width?: number;
+  height?: number;
+  aspectRatio?: string;
+  quality?: 'standard' | 'hd';
+  style?: 'vivid' | 'natural';
+}
+
+export interface ImageGenerationResult {
+  output: string | string[]; // URL(s) to the generated image
+  status: 'succeeded' | 'failed' | 'processing';
+  error?: string;
 }
 
 export interface VideoGenerationResult {
@@ -328,78 +326,29 @@ export async function generateVideo(
   // Calculate numFrames based on duration and fps (for reference, not used in API call)
   // const numFrames = Math.ceil(duration * fps);
 
-  // Map cost tier selection to specific models
-  const userCostPerSecond = options.costPerSecond || 0.20; // Default to Standard tier
-  
-  // Get the specific model for this cost tier
-  const selectedModelId = COST_TIER_TO_MODEL[userCostPerSecond];
+  // Use the selected video model ID directly
+  const selectedModelId = options.videoModelId || 'google/veo-3.1'; // Default to Veo 3.1
   
   let videoGenerationModels: VideoModel[];
   
-  if (selectedModelId) {
-    // Use the specific model mapped to this cost tier
-    console.log(`[REPLICATE] Cost tier $${userCostPerSecond}/sec mapped to model: ${selectedModelId}`);
-    
-    // Fetch all models to get details for the selected model
-    const allVideoModels = await fetchVideoGenerationModels();
-    const selectedModel = allVideoModels.find(m => m.id === selectedModelId);
-    
-    if (selectedModel) {
-      videoGenerationModels = [selectedModel];
-      console.log(`[REPLICATE] Using model: ${selectedModel.id} (${selectedModel.name}) for cost tier $${userCostPerSecond}/sec`);
-    } else {
-      // Fallback: try to find model in fallback list
-      const fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === selectedModelId);
-      if (fallbackModel) {
-        videoGenerationModels = [fallbackModel];
-        console.log(`[REPLICATE] Using fallback model: ${fallbackModel.id} (${fallbackModel.name}) for cost tier $${userCostPerSecond}/sec`);
-      } else {
-        // Last resort: use first available model
-        console.warn(`[REPLICATE] Model ${selectedModelId} not found, using first available model`);
-        videoGenerationModels = allVideoModels.length > 0 ? [allVideoModels[0]] : FALLBACK_VIDEO_MODELS.slice(0, 1);
-      }
-    }
+  // Fetch all models to get details for the selected model
+  const allVideoModels = await fetchVideoGenerationModels();
+  const selectedModel = allVideoModels.find(m => m.id === selectedModelId);
+  
+  if (selectedModel) {
+    videoGenerationModels = [selectedModel];
+    console.log(`[REPLICATE] Using model: ${selectedModel.id} (${selectedModel.name})`);
   } else {
-    // No mapping found, use default logic
-    console.warn(`[REPLICATE] No model mapping for cost tier $${userCostPerSecond}/sec, using default selection`);
-    const allVideoModels = await fetchVideoGenerationModels();
-    
-    // Determine which tier the user selected
-    let selectedTier: VideoModel['tier'] = 'standard';
-    if (userCostPerSecond <= 0.03) {
-      selectedTier = 'budget';
-    } else if (userCostPerSecond <= 0.10) {
-      selectedTier = 'economy';
-    } else if (userCostPerSecond <= 0.50) {
-      selectedTier = 'standard';
-    } else if (userCostPerSecond <= 1.00) {
-      selectedTier = 'advanced';
+    // Fallback: try to find model in fallback list
+    const fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === selectedModelId);
+    if (fallbackModel) {
+      videoGenerationModels = [fallbackModel];
+      console.log(`[REPLICATE] Using fallback model: ${fallbackModel.id} (${fallbackModel.name})`);
     } else {
-      selectedTier = 'premium';
+      // Last resort: use first available model
+      console.warn(`[REPLICATE] Model ${selectedModelId} not found, using first available model`);
+      videoGenerationModels = allVideoModels.length > 0 ? [allVideoModels[0]] : FALLBACK_VIDEO_MODELS.slice(0, 1);
     }
-
-    // Filter models that match the user's cost tier
-    const tierOrder: VideoModel['tier'][] = ['budget', 'economy', 'standard', 'advanced', 'premium'];
-    const selectedTierIndex = tierOrder.indexOf(selectedTier);
-    
-    videoGenerationModels = allVideoModels
-      .filter(model => {
-        const modelTierIndex = tierOrder.indexOf(model.tier);
-        return modelTierIndex === selectedTierIndex;
-      })
-      .sort((a, b) => a.costPerSecond - b.costPerSecond);
-
-    if (videoGenerationModels.length === 0) {
-      // Fallback to fallback models
-      videoGenerationModels = FALLBACK_VIDEO_MODELS.filter(m => m.tier === selectedTier);
-      if (videoGenerationModels.length === 0) {
-        videoGenerationModels = FALLBACK_VIDEO_MODELS.slice(0, 1);
-      }
-    }
-
-    console.log(`[REPLICATE] User selected cost tier: $${userCostPerSecond}/sec (${selectedTier})`);
-    console.log(`[REPLICATE] Selected ${videoGenerationModels.length} models:`, 
-      videoGenerationModels.map(m => `${m.id} ($${m.costPerSecond.toFixed(2)}/sec, ${m.tier})`).join(', '));
   }
   
   let lastError: Error | null = null;
@@ -425,6 +374,9 @@ export async function generateVideo(
 
         // Use replicate.run for simpler API - it handles the prediction lifecycle automatically
         // Truncate prompt to reasonable length to avoid API issues
+        if (!prompt || typeof prompt !== 'string') {
+          throw new Error(`Invalid prompt: prompt must be a non-empty string, got ${typeof prompt}`);
+        }
         const truncatedPrompt = prompt.substring(0, 500);
         
         if (truncatedPrompt.length < prompt.length) {
@@ -453,22 +405,30 @@ export async function generateVideo(
             prompt: truncatedPrompt,
           };
           
-          // Add aspect_ratio parameter for Sora-2 and other models that support it
+          // Add aspect_ratio parameter ONLY for models that support it (e.g., Sora-2)
           // Sora-2 accepts aspect_ratio parameter (e.g., "16:9", "9:16", "1:1", "21:9", "4:3")
-          if (aspectRatio) {
-            // Normalize aspect ratio format (ensure it's in "W:H" format)
-            const normalizedAspectRatio = aspectRatio.includes(':') 
-              ? aspectRatio 
-              : convertAspectRatioToRatio(aspectRatio);
-            
-            if (normalizedAspectRatio) {
-              modelInput.aspect_ratio = normalizedAspectRatio;
-              console.log(`[REPLICATE] Adding aspect_ratio parameter: ${normalizedAspectRatio}`);
+          // Only add aspect_ratio for Sora-2, not for other models
+          const supportsAspectRatio = model.id === 'openai/sora-2';
+          
+          if (supportsAspectRatio) {
+            if (aspectRatio) {
+              // Normalize aspect ratio format (ensure it's in "W:H" format)
+              const normalizedAspectRatio = aspectRatio.includes(':') 
+                ? aspectRatio 
+                : convertAspectRatioToRatio(aspectRatio);
+              
+              if (normalizedAspectRatio) {
+                modelInput.aspect_ratio = normalizedAspectRatio;
+                console.log(`[REPLICATE] Adding aspect_ratio parameter: ${normalizedAspectRatio}`);
+              }
+            } else {
+              // Default to 16:9 landscape for Sora-2 if not specified
+              modelInput.aspect_ratio = '16:9';
+              console.log(`[REPLICATE] Using default aspect_ratio: 16:9 for Sora-2`);
             }
-          } else {
-            // Default to 16:9 landscape if not specified (prevents mobile/portrait videos)
-            modelInput.aspect_ratio = '16:9';
-            console.log(`[REPLICATE] Using default aspect_ratio: 16:9`);
+          } else if (aspectRatio) {
+            // For other models, log that aspect_ratio is not supported
+            console.log(`[REPLICATE] Model ${model.id} does not support aspect_ratio parameter, ignoring`);
           }
           
           // Use model ID directly (Replicate SDK handles version resolution)
@@ -551,6 +511,19 @@ export async function generateVideo(
           const errorMessage = apiError?.message || 'No error message';
           const errorBody = apiError?.response?.data || apiError?.body || apiError?.response?.text || 'N/A';
           
+          // Safely format error body for logging
+          let errorBodyStr = 'N/A';
+          try {
+            if (typeof errorBody === 'string') {
+              errorBodyStr = errorBody.substring(0, 500);
+            } else if (errorBody !== undefined && errorBody !== null) {
+              const stringified = JSON.stringify(errorBody);
+              errorBodyStr = stringified ? stringified.substring(0, 500) : 'N/A';
+            }
+          } catch (e) {
+            errorBodyStr = 'Error formatting error body';
+          }
+          
           console.error(`[REPLICATE] API call failed for model ${model.id} with detailed error:`, {
             model: model.id,
             modelName: model.name,
@@ -558,10 +531,10 @@ export async function generateVideo(
             errorType: apiError?.constructor?.name || 'Unknown',
             errorMessage: errorMessage,
             statusCode: statusCode || 'N/A',
-            errorBody: typeof errorBody === 'string' ? errorBody.substring(0, 500) : JSON.stringify(errorBody).substring(0, 500),
+            errorBody: errorBodyStr,
             requestUrl: apiError?.request?.url || apiError?.config?.url || 'N/A',
             requestMethod: apiError?.request?.method || apiError?.config?.method || 'N/A',
-            stack: apiError?.stack?.split('\n').slice(0, 5).join('\n') || 'N/A',
+            stack: (apiError?.stack && typeof apiError.stack === 'string') ? apiError.stack.split('\n').slice(0, 5).join('\n') : 'N/A',
           });
           
           // Check if this is a model not found error (422)
@@ -735,6 +708,115 @@ function convertAspectRatioToRatio(aspectRatio: string): string | null {
   // Default to 16:9 if unknown format
   console.warn(`[REPLICATE] Unknown aspect ratio format: ${aspectRatio}, defaulting to 16:9`);
   return '16:9';
+}
+
+/**
+ * Generate image using Replicate API
+ */
+export async function generateImage(
+  options: ImageGenerationOptions,
+  maxRetries: number = 3
+): Promise<ImageGenerationResult> {
+  console.log('[REPLICATE] Starting image generation', {
+    promptLength: options.prompt?.length || 0,
+    modelId: options.imageModelId,
+  });
+
+  if (!replicate) {
+    console.error('[REPLICATE] ERROR: Replicate client not initialized - missing API token');
+    return {
+      output: '',
+      status: 'failed',
+      error: 'REPLICATE_API_TOKEN is required. Please set REPLICATE_API_TOKEN in your environment variables.',
+    };
+  }
+
+  const {
+    prompt,
+    imageModelId = 'openai/dall-e-3',
+    aspectRatio,
+  } = options;
+
+  const modelIdToUse = imageModelId;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[REPLICATE] Attempt ${attempt}/${maxRetries} with model ${modelIdToUse}`);
+      
+      const truncatedPrompt = prompt.substring(0, 1000);
+      
+      const modelInput: any = {
+        prompt: truncatedPrompt,
+      };
+      
+      // Add aspect_ratio if specified
+      if (aspectRatio) {
+        const normalizedAspectRatio = aspectRatio.includes(':') 
+          ? aspectRatio 
+          : convertAspectRatioToRatio(aspectRatio);
+        
+        if (normalizedAspectRatio) {
+          modelInput.aspect_ratio = normalizedAspectRatio;
+        }
+      }
+      
+      console.log(`[REPLICATE] Calling replicate.run("${modelIdToUse}", { input: ${JSON.stringify(modelInput)} })`);
+      
+      const runOutput = await replicate.run(modelIdToUse as any, { input: modelInput });
+      
+      let output: string | string[];
+      
+      // Handle different output formats (similar to video generation)
+      if (runOutput && typeof (runOutput as any).url === 'function') {
+        output = (runOutput as any).url();
+      } else if (typeof runOutput === 'string') {
+        output = runOutput;
+      } else if (Array.isArray(runOutput)) {
+        output = runOutput.map((item: any) => {
+          if (typeof item === 'string') return item;
+          if (item && typeof item.url === 'function') return item.url();
+          if (item && typeof item === 'object' && 'url' in item) return item.url as string;
+          return String(item);
+        });
+      } else if (runOutput && typeof runOutput === 'object' && 'url' in runOutput) {
+        output = (runOutput as any).url;
+      } else {
+        output = String(runOutput);
+      }
+      
+      if (typeof output === 'string') {
+        output = String(output);
+      } else if (Array.isArray(output)) {
+        output = output.map(String);
+      }
+      
+      console.log(`[REPLICATE] Image generation succeeded with model ${modelIdToUse}`);
+      return {
+        output,
+        status: 'succeeded',
+      };
+    } catch (error: any) {
+      console.error(`[REPLICATE] Attempt ${attempt}/${maxRetries} failed:`, error);
+      
+      if (attempt === maxRetries) {
+        return {
+          output: '',
+          status: 'failed',
+          error: error.message || 'Image generation failed',
+        };
+      }
+      
+      const waitTime = Math.pow(2, attempt) * 2000;
+      console.log(`[REPLICATE] Retrying in ${waitTime}ms...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+  }
+  
+  return {
+    output: '',
+    status: 'failed',
+    error: 'Image generation failed after retries',
+  };
 }
 
 /**
