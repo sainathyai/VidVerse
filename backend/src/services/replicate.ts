@@ -36,6 +36,7 @@ const MODEL_PRICING: Record<string, { costPerSecond: number; tier: VideoModel['t
     'google/veo-3-fast': { costPerSecond: 0.15, tier: 'standard' },
     'openai/sora-2': { costPerSecond: 0.10, tier: 'standard' },
     'openai/sora-2-pro': { costPerSecond: 0.15, tier: 'premium' },
+    'kwaivgi/kling-v2.5-turbo-pro': { costPerSecond: 0.07, tier: 'economy' },
   };
 
 // Model ID to display name mapping for video models
@@ -45,6 +46,7 @@ export const VIDEO_MODEL_NAMES: Record<string, string> = {
   'google/veo-3-fast': 'Veo 3 Fast',
   'openai/sora-2': 'Sora 2',
   'openai/sora-2-pro': 'Sora 2 Pro',
+  'kwaivgi/kling-v2.5-turbo-pro': 'Kling 2.5 Turbo Pro',
 };
 
 // Model ID to display name mapping for image models
@@ -419,6 +421,7 @@ export async function generateVideo(
           const isSora2Pro = model.id === 'openai/sora-2-pro';
           const isVeo3Fast = model.id === 'google/veo-3-fast';
           const isVeo3 = model.id === 'google/veo-3' || model.id === 'google/veo-3.1';
+          const isKling = model.id === 'kwaivgi/kling-v2.5-turbo-pro';
           
           if (isVeo3Fast) {
             // Veo 3 Fast format: prompt, aspect_ratio, duration, resolution, generate_audio, image, negative_prompt, seed, enhance_prompt

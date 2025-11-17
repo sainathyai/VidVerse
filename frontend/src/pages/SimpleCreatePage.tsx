@@ -112,6 +112,7 @@ function SimpleCreateContent() {
     { value: 'google/veo-3.1', label: 'Veo 3.1' },
     { value: 'google/veo-3-fast', label: 'Veo 3 Fast' },
     { value: 'openai/sora-2', label: 'Sora 2' },
+    { value: 'kwaivgi/kling-v2.5-turbo-pro', label: 'Kling 2.5 Turbo Pro' },
   ];
 
   const imageModelOptions = [
