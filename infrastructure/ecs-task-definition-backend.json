@@ -28,7 +28,7 @@
         },
         {
           "name": "ALLOWED_ORIGINS",
-          "value": "https://vidverseai.com"
+          "value": "https://vidverseai.com,https://www.vidverseai.com"
         },
         {
           "name": "FRONTEND_URL",

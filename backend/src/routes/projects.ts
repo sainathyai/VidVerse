@@ -18,7 +18,8 @@ const createProjectSchema = z.object({
   aspectRatio: z.string().optional(),
   colorPalette: z.string().optional(),
   pacing: z.string().optional(),
-  costPerSecond: z.number().optional(),
+  videoModelId: z.string().optional(),
+  imageModelId: z.string().optional(),
   mode: z.enum(['classic', 'agentic']).default('classic'),
   audioUrl: z.string().url().optional(), // Store uploaded audio URL
 });
@@ -45,7 +46,8 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
           constraints: { type: 'string' },
           mode: { type: 'string', enum: ['classic', 'agentic'], default: 'classic' },
           audioUrl: { type: 'string' },
-          costPerSecond: { type: 'number' },
+          videoModelId: { type: 'string' },
+          imageModelId: { type: 'string' },
         },
       },
       response: {
@@ -118,7 +120,8 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
           aspectRatio: data.aspectRatio,
           colorPalette: data.colorPalette,
           pacing: data.pacing,
-          costPerSecond: data.costPerSecond,
+          videoModelId: data.videoModelId,
+          imageModelId: data.imageModelId,
           audioUrl: data.audioUrl,
         }),
       ]
@@ -320,11 +323,11 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
         }, `Step 3.${i + 1}: Generating video for scene ${scene.sceneNumber}/${scenes.length} with unique prompt`);
 
         try {
-          // Generate video for scene with user's cost tier and aspect ratio
+          // Generate video for scene with user's selected video model and aspect ratio
           const result = await generateVideo({
             prompt: scene.prompt,
             duration: scene.duration,
-            costPerSecond: config.costPerSecond, // Pass user's selected cost tier
+            videoModelId: config.videoModelId || 'google/veo-3.1', // Pass user's selected video model
             aspectRatio: config.aspectRatio || '16:9', // Pass aspect ratio (default to 16:9 landscape)
           });
 
