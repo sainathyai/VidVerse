@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { MessageCircle, X, Send, Loader2, Minimize2, Sparkles, Copy, ChevronDown } from 'lucide-react';
+import { MessageCircle, X, Send, Loader2, Minimize2, Sparkles, Copy, ChevronDown, Paperclip, FileText } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { useAuth } from './auth/AuthProvider';
 
@@ -19,6 +19,12 @@ interface AIChatPanelProps {
   onApplyPrompt?: (prompt: string) => void;
 }
 
+interface AttachedFile {
+  name: string;
+  content: string;
+  size: number;
+}
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -26,6 +32,7 @@ interface ChatMessage {
   timestamp: Date;
   isQuestion?: boolean;
   showImport?: boolean;
+  attachedFiles?: AttachedFile[];
 }
 
 interface DefaultPrompt {
@@ -44,8 +51,10 @@ export function AIChatPanel({ projectId, projectContext, onApplyPrompt }: AIChat
   const [selectedModel, setSelectedModel] = useState<string>('openai/gpt-4o-mini');
   const [showDefaultPrompts, setShowDefaultPrompts] = useState(true);
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const { getAccessToken } = useAuth();
 
   const defaultPrompts: DefaultPrompt[] = [
@@ -169,15 +178,65 @@ Ask me questions to better understand my vision, then provide creative recommend
     return selectedModel;
   };
 
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const newFiles: AttachedFile[] = [];
+    
+    for (const file of Array.from(files)) {
+      // Only accept text files
+      if (!file.type.startsWith('text/') && !file.name.match(/\.(txt|md|json|js|ts|tsx|jsx|css|html|xml|yaml|yml|log|csv)$/i)) {
+        alert(`File "${file.name}" is not a text file. Please select only text files.`);
+        continue;
+      }
+
+      try {
+        const content = await file.text();
+        newFiles.push({
+          name: file.name,
+          content: content,
+          size: file.size,
+        });
+      } catch (error) {
+        console.error(`Error reading file ${file.name}:`, error);
+        alert(`Error reading file "${file.name}". Please try again.`);
+      }
+    }
+
+    if (newFiles.length > 0) {
+      setAttachedFiles(prev => [...prev, ...newFiles]);
+    }
+
+    // Reset file input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const removeAttachedFile = (index: number) => {
+    setAttachedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputMessage.trim() || isLoading) return;
+    if ((!inputMessage.trim() && attachedFiles.length === 0) || isLoading) return;
+
+    // Build message content with attached files
+    let messageContent = inputMessage.trim();
+    if (attachedFiles.length > 0) {
+      const fileContents = attachedFiles.map(file => 
+        `\n\n[Attached file: ${file.name}]\n${file.content}`
+      ).join('\n\n');
+      messageContent = messageContent ? `${messageContent}${fileContents}` : `Please analyze the following attached files:${fileContents}`;
+    }
 
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
       content: inputMessage.trim(),
       timestamp: new Date(),
+      attachedFiles: attachedFiles.length > 0 ? [...attachedFiles] : undefined,
     };
 
     // Build conversation history BEFORE adding current message
@@ -188,6 +247,7 @@ Ask me questions to better understand my vision, then provide creative recommend
 
     setMessages(prev => [...prev, userMessage]);
     setInputMessage('');
+    setAttachedFiles([]);
     setIsLoading(true);
 
     try {
@@ -201,7 +261,7 @@ Ask me questions to better understand my vision, then provide creative recommend
         {
           method: 'POST',
           body: JSON.stringify({
-            message: userMessage.content,
+            message: messageContent,
             projectId: projectId,
             conversationId: conversationId,
             model: selectedModel,
@@ -364,6 +424,19 @@ Ask me questions to better understand my vision, then provide creative recommend
                     <span className="text-xs text-blue-400/80 font-medium">Asking for clarification</span>
                   </div>
                 )}
+                {message.attachedFiles && message.attachedFiles.length > 0 && (
+                  <div className="mb-2 space-y-1.5">
+                    {message.attachedFiles.map((file, idx) => (
+                      <div key={idx} className="flex items-center gap-2 px-2 py-1.5 rounded bg-white/5 border border-white/10">
+                        <FileText className="w-3.5 h-3.5 text-white/60 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-medium text-white/90 truncate">{file.name}</p>
+                          <p className="text-xs text-white/50">{(file.size / 1024).toFixed(1)} KB</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
                 {message.role === 'assistant' && onApplyPrompt && message.showImport && (
                   <button
@@ -420,7 +493,46 @@ Ask me questions to better understand my vision, then provide creative recommend
 
       {/* Input */}
       <div className="p-4 border-t border-white/10 bg-black/20 backdrop-blur-sm space-y-3">
+        {/* Attached Files Display */}
+        {attachedFiles.length > 0 && (
+          <div className="space-y-1.5">
+            {attachedFiles.map((file, idx) => (
+              <div key={idx} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5 border border-white/10">
+                <FileText className="w-4 h-4 text-white/60 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-white/90 truncate">{file.name}</p>
+                  <p className="text-xs text-white/50">{(file.size / 1024).toFixed(1)} KB</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removeAttachedFile(idx)}
+                  className="p-1 text-white/50 hover:text-white hover:bg-white/10 rounded transition-colors"
+                  title="Remove file"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <form onSubmit={handleSendMessage} className="flex gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.md,.json,.js,.ts,.tsx,.jsx,.css,.html,.xml,.yaml,.yml,.log,.csv,text/*"
+            multiple
+            onChange={handleFileSelect}
+            className="hidden"
+            id="file-attachment-input"
+          />
+          <label
+            htmlFor="file-attachment-input"
+            className="px-3 py-2.5 rounded-lg border border-white/10 bg-black/30 backdrop-blur-sm text-white/70 hover:text-white hover:bg-black/40 hover:border-white/20 transition-all cursor-pointer flex items-center justify-center self-end"
+            title="Attach text file"
+          >
+            <Paperclip className="w-4 h-4" />
+          </label>
           <textarea
             value={inputMessage}
             onChange={(e) => {
@@ -435,7 +547,7 @@ Ask me questions to better understand my vision, then provide creative recommend
           />
           <button
             type="submit"
-            disabled={!inputMessage.trim() || isLoading}
+            disabled={(!inputMessage.trim() && attachedFiles.length === 0) || isLoading}
             className="px-4 py-2.5 rounded-lg bg-gradient-to-r from-blue-500 to-purple-500 text-white hover:from-blue-600 hover:to-purple-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-blue-500/30 flex items-center justify-center self-end"
           >
             {isLoading ? (
