@@ -265,6 +265,11 @@ export interface VideoGenerationOptions {
   numFrames?: number;
   videoModelId?: string; // Selected video model ID (e.g., 'google/veo-3.1')
   aspectRatio?: string; // Aspect ratio string like "16:9", "9:16", "1:1", etc.
+  // Veo 3.1 specific parameters
+  image?: string; // URL of reference image
+  lastFrame?: string; // URL of last frame for continuation
+  negativePrompt?: string; // Negative prompt
+  seed?: number; // Seed for reproducibility
 }
 
 export interface ImageGenerationOptions {
@@ -465,6 +470,27 @@ export async function generateVideo(
             modelInput.duration = Math.min(duration, 60); // Veo supports up to 60 seconds
             modelInput.resolution = '1080p'; // Default to 1080p, can be made configurable later
             modelInput.generate_audio = false; // Default to false, can be made configurable later
+            
+            // Add optional Veo 3.1 parameters
+            if (options.image) {
+              modelInput.image = options.image;
+              console.log(`[REPLICATE] Adding image parameter for Veo 3.1: ${options.image}`);
+            }
+            
+            if (options.lastFrame) {
+              modelInput.last_frame = options.lastFrame;
+              console.log(`[REPLICATE] Adding last_frame parameter for Veo 3.1: ${options.lastFrame}`);
+            }
+            
+            if (options.negativePrompt) {
+              modelInput.negative_prompt = options.negativePrompt;
+              console.log(`[REPLICATE] Adding negative_prompt parameter for Veo 3.1`);
+            }
+            
+            if (options.seed !== undefined && options.seed !== null) {
+              modelInput.seed = options.seed;
+              console.log(`[REPLICATE] Adding seed parameter for Veo 3.1: ${options.seed}`);
+            }
             
             console.log(`[REPLICATE] Adding Veo 3 parameters: aspect_ratio=${veoAspectRatio}, duration=${modelInput.duration}, resolution=${modelInput.resolution}`);
             
