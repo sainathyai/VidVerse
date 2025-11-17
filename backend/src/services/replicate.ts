@@ -405,13 +405,12 @@ export async function generateVideo(
             prompt: truncatedPrompt,
           };
           
-          // Add aspect_ratio parameter ONLY for models that support it (e.g., Sora-2)
-          // Sora-2 accepts aspect_ratio as "portrait" (720x1280) or "landscape" (1280x720)
-          // Only add aspect_ratio for Sora-2, not for other models
-          const supportsAspectRatio = model.id === 'openai/sora-2';
+          // Handle model-specific parameters
+          const isSora2 = model.id === 'openai/sora-2';
+          const isVeo3 = model.id === 'google/veo-3' || model.id === 'google/veo-3.1' || model.id === 'google/veo-3-fast';
           
-          if (supportsAspectRatio) {
-            // Convert aspect ratio to Sora-2 format: "portrait" or "landscape"
+          if (isSora2) {
+            // Sora-2 format: aspect_ratio as "portrait" or "landscape", seconds as 4/8/12
             let soraAspectRatio: string;
             if (aspectRatio) {
               // Normalize aspect ratio format first
@@ -436,8 +435,7 @@ export async function generateVideo(
             modelInput.aspect_ratio = soraAspectRatio;
             console.log(`[REPLICATE] Adding aspect_ratio parameter for Sora-2: ${soraAspectRatio}`);
             
-            // Sora-2 also requires "seconds" parameter (4, 8, or 12)
-            // Round duration to nearest valid value
+            // Sora-2 requires "seconds" parameter (4, 8, or 12)
             const validSeconds = [4, 8, 12];
             const requestedSeconds = Math.min(duration, 12);
             const soraSeconds = validSeconds.reduce((prev, curr) => 
@@ -445,6 +443,30 @@ export async function generateVideo(
             );
             modelInput.seconds = soraSeconds;
             console.log(`[REPLICATE] Setting seconds parameter for Sora-2: ${soraSeconds} (requested: ${duration})`);
+          } else if (isVeo3) {
+            // Veo 3/3.1 format: duration, resolution, aspect_ratio as "16:9", generate_audio, reference_images
+            // Normalize aspect ratio to "W:H" format (e.g., "16:9", "9:16", "1:1")
+            let veoAspectRatio: string;
+            if (aspectRatio) {
+              const normalizedAspectRatio = aspectRatio.includes(':') 
+                ? aspectRatio 
+                : convertAspectRatioToRatio(aspectRatio);
+              veoAspectRatio = normalizedAspectRatio || '16:9';
+            } else {
+              veoAspectRatio = '16:9'; // Default to 16:9 landscape
+            }
+            
+            modelInput.aspect_ratio = veoAspectRatio;
+            modelInput.duration = Math.min(duration, 60); // Veo supports up to 60 seconds
+            modelInput.resolution = '1080p'; // Default to 1080p, can be made configurable later
+            modelInput.generate_audio = false; // Default to false, can be made configurable later
+            
+            console.log(`[REPLICATE] Adding Veo 3 parameters: aspect_ratio=${veoAspectRatio}, duration=${modelInput.duration}, resolution=${modelInput.resolution}`);
+            
+            // TODO: Add support for reference_images if provided in options
+            // if (options.referenceImages && Array.isArray(options.referenceImages)) {
+            //   modelInput.reference_images = options.referenceImages;
+            // }
           } else if (aspectRatio) {
             // For other models, log that aspect_ratio is not supported
             console.log(`[REPLICATE] Model ${model.id} does not support aspect_ratio parameter, ignoring`);
