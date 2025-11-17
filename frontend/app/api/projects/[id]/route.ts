@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// Use localhost in development, production URL in production
+const getApiBaseUrl = () => {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  const isDev = process.env.NODE_ENV === 'development';
+  return isDev ? 'http://localhost:3001' : 'https://api.vidverseai.com';
+};
+
+const API_BASE_URL = getApiBaseUrl();
 
 export async function GET(
   request: NextRequest,

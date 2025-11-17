@@ -1,0 +1,73 @@
+{
+  "family": "vidverse-frontend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "frontend",
+      "image": "ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/vidverse-frontend:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 80,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "VITE_API_URL",
+          "value": "https://api.vidverseai.com"
+        },
+        {
+          "name": "VITE_AWS_REGION",
+          "value": "us-west-2"
+        },
+        {
+          "name": "VITE_OAUTH_REDIRECT_SIGN_IN",
+          "value": "https://vidverseai.com/auth/callback"
+        },
+        {
+          "name": "VITE_OAUTH_REDIRECT_SIGN_OUT",
+          "value": "https://vidverseai.com/login"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "VITE_COGNITO_USER_POOL_ID",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:ACCOUNT_ID:secret:vidverse/cognito-user-pool-id"
+        },
+        {
+          "name": "VITE_COGNITO_CLIENT_ID",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:ACCOUNT_ID:secret:vidverse/cognito-client-id"
+        },
+        {
+          "name": "VITE_COGNITO_DOMAIN",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:ACCOUNT_ID:secret:vidverse/cognito-domain"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/vidverse-frontend",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost/health || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      }
+    }
+  ]
+}
+

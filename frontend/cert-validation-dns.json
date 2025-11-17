@@ -1,0 +1,43 @@
+{
+    "Changes":  [
+                    {
+                        "ResourceRecordSet":  {
+                                                  "TTL":  300,
+                                                  "Name":  "_c6f555556164a9f89309436a45f55b3d.vidverseai.com.",
+                                                  "Type":  "CNAME",
+                                                  "ResourceRecords":  [
+                                                                          {
+                                                                              "Value":  "_5b23a3a89d76ee75269dfb4ef0a6b305.jkddzztszm.acm-validations.aws."
+                                                                          }
+                                                                      ]
+                                              },
+                        "Action":  "UPSERT"
+                    },
+                    {
+                        "ResourceRecordSet":  {
+                                                  "TTL":  300,
+                                                  "Name":  "_28813df9629fb970716b8081f49af693.api.vidverseai.com.",
+                                                  "Type":  "CNAME",
+                                                  "ResourceRecords":  [
+                                                                          {
+                                                                              "Value":  "_857cf903574801b0f399eb0148690336.jkddzztszm.acm-validations.aws."
+                                                                          }
+                                                                      ]
+                                              },
+                        "Action":  "UPSERT"
+                    },
+                    {
+                        "ResourceRecordSet":  {
+                                                  "TTL":  300,
+                                                  "Name":  "_0ee9677b6986a7e038eac0f3f72c6967.www.vidverseai.com.",
+                                                  "Type":  "CNAME",
+                                                  "ResourceRecords":  [
+                                                                          {
+                                                                              "Value":  "_2c8da1d37ac9b35b49f5531617f16b7b.jkddzztszm.acm-validations.aws."
+                                                                          }
+                                                                      ]
+                                              },
+                        "Action":  "UPSERT"
+                    }
+                ]
+}

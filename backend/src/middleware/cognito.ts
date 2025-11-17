@@ -10,12 +10,12 @@ export function setFastifyInstance(instance: any) {
 }
 
 // Create JWT verifier
-let verifier: ReturnType<typeof CognitoJwtVerifier.create> | null = null;
+let verifier: any = null;
 
-if (config.cognito.userPoolId) {
+if (config.cognito.userPoolId && config.cognito.clientId) {
   verifier = CognitoJwtVerifier.create({
     userPoolId: config.cognito.userPoolId,
-    tokenUse: 'access',
+    tokenUse: 'access' as const,
     clientId: config.cognito.clientId,
   });
 }
@@ -55,16 +55,26 @@ export async function verifyCognitoToken(
   try {
     const payload = await verifier.verify(token);
     
-    return {
-      sub: payload.sub,
-      email: payload.email,
-      username: payload.username || payload['cognito:username'],
-      'cognito:groups': payload['cognito:groups'],
-    };
-  } catch (error) {
-    // Log error but don't expose details
     if (fastifyInstance) {
-      fastifyInstance.log.warn({ err: error }, 'Token verification failed');
+      fastifyInstance.log.debug({ sub: payload.sub, email: payload.email }, 'Token verified successfully');
+    }
+    
+    return {
+      sub: payload.sub as string,
+      email: payload.email as string | undefined,
+      username: (payload.username || payload['cognito:username'] || payload.email) as string,
+      'cognito:groups': payload['cognito:groups'] as string[] | undefined,
+    };
+  } catch (error: any) {
+    // Log error with details for debugging
+    if (fastifyInstance) {
+      fastifyInstance.log.error({ 
+        err: error,
+        message: error?.message,
+        name: error?.name,
+        tokenLength: token.length,
+        tokenPrefix: token.substring(0, 20) + '...'
+      }, 'Token verification failed');
     }
     return null;
   }

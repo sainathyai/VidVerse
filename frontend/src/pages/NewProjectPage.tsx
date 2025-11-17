@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -8,6 +8,7 @@ import { AudioWaveform } from "../components/AudioWaveform";
 import { ProtectedRoute } from "../components/auth/ProtectedRoute";
 import { useAuth } from "../components/auth/AuthProvider";
 import { apiRequest } from "../lib/api";
+import { Header } from "../components/Header";
 
 function NewProjectContent() {
   const [currentStep, setCurrentStep] = useState(1);
@@ -23,15 +24,38 @@ function NewProjectContent() {
     handleSubmit,
     formState: { errors, isSubmitting },
     watch,
+    setValue,
   } = useForm<ProjectFormData>({
     resolver: zodResolver(projectSchema),
     defaultValues: {
-      mode: "classic",
+      name: "My New Video Project",
+      category: "ad_creative",
+      prompt: "Create an elegant and sophisticated advertisement for luxury watches. Showcase the timepiece with close-up shots highlighting craftsmanship, premium materials, and timeless design. Include scenes of luxury lifestyle, refined settings, and emphasize the prestige and quality of the brand.",
       duration: 60,
+      style: "cinematic",
+      mood: "energetic",
+      constraints: "16:9 aspect ratio, high quality visuals, smooth transitions",
+      mode: "classic",
     },
   });
 
   const category = watch("category");
+  const [lastCategory, setLastCategory] = useState<string | null>(null);
+
+  // Category-specific prompts
+  const categoryPrompts = {
+    music_video: "A cinematic music video with dynamic camera movements, vibrant colors, and smooth transitions between scenes. Include elements of modern urban landscapes and artistic visual effects.",
+    ad_creative: "Create an elegant and sophisticated advertisement for luxury watches. Showcase the timepiece with close-up shots highlighting craftsmanship, premium materials, and timeless design. Include scenes of luxury lifestyle, refined settings, and emphasize the prestige and quality of the brand.",
+    explainer: "An engaging explainer video that breaks down complex concepts into simple, visual narratives. Use clear animations, step-by-step demonstrations, and friendly narration. Include visual metaphors, diagrams, and real-world examples to make the information accessible and memorable.",
+  };
+
+  // Update prompt when category changes
+  useEffect(() => {
+    if (category && categoryPrompts[category] && category !== lastCategory) {
+      setValue("prompt", categoryPrompts[category]);
+      setLastCategory(category);
+    }
+  }, [category, setValue, lastCategory]);
 
   const onSubmit = async (data: ProjectFormData) => {
     try {
@@ -70,10 +94,10 @@ function NewProjectContent() {
       try {
         setUploading(true);
         const token = await getAccessToken();
-        const publicUrl = await uploadFile(file, "audio", token, (progress) => {
+        const { url } = await uploadFile(file, "audio", token, (progress) => {
           setUploadProgress(progress);
         });
-        setAudioUrl(publicUrl);
+        setAudioUrl(url);
       } catch (error) {
         console.error("Upload error:", error);
         alert("Failed to upload audio file. Please try again.");
@@ -84,9 +108,10 @@ function NewProjectContent() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-neutral-900 via-neutral-800 to-neutral-900 p-8">
-      <div className="max-w-4xl mx-auto">
-        {/* Header */}
+    <div className="min-h-screen bg-gradient-to-br from-neutral-900 via-neutral-800 to-neutral-900">
+      <Header />
+      <div className="max-w-4xl mx-auto p-8">
+        {/* Page Header */}
         <div className="mb-8">
           <Link to="/dashboard" className="text-muted hover:text-white mb-4 inline-block">
             ← Back to Dashboard
@@ -127,6 +152,23 @@ function NewProjectContent() {
           {currentStep === 1 && (
             <div className="rounded-xl border border-white/10 bg-surface/60 backdrop-blur-xl p-6 space-y-6">
               <h2 className="text-2xl font-semibold text-white mb-4">Project Details</h2>
+
+              {/* Project Name */}
+              <div>
+                <label htmlFor="name" className="block text-sm font-medium text-white mb-2">
+                  Project Name <span className="text-danger">*</span>
+                </label>
+                <input
+                  type="text"
+                  id="name"
+                  {...register("name")}
+                  className="w-full rounded-lg border border-white/10 bg-surface px-4 py-3 text-white placeholder-muted focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20 transition-all"
+                  placeholder="Enter a name for your project..."
+                />
+                {errors.name && (
+                  <p className="text-danger text-sm mt-1">{errors.name.message}</p>
+                )}
+              </div>
 
               {/* Category */}
               <div>
@@ -238,6 +280,20 @@ function NewProjectContent() {
                   {...register("mood")}
                   className="w-full rounded-lg border border-white/10 bg-surface px-4 py-3 text-white placeholder-muted focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20 transition-all"
                   placeholder="e.g., energetic, calm, mysterious, joyful"
+                />
+              </div>
+
+              {/* Constraints */}
+              <div>
+                <label htmlFor="constraints" className="block text-sm font-medium text-white mb-2">
+                  Constraints & Requirements
+                </label>
+                <textarea
+                  id="constraints"
+                  {...register("constraints")}
+                  rows={3}
+                  className="w-full rounded-lg border border-white/10 bg-surface px-4 py-3 text-white placeholder-muted focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20 transition-all"
+                  placeholder="e.g., 16:9 aspect ratio, high quality visuals, smooth transitions, specific color palette"
                 />
               </div>
 

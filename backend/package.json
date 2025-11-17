@@ -11,8 +11,9 @@
     "test:coverage": "vitest --coverage",
     "lint": "eslint src --ext .ts",
     "type-check": "tsc --noEmit",
-    "db:migrate": "node scripts/migrate.js",
-    "db:generate": "node scripts/generate-types.js"
+    "db:migrate": "tsx scripts/run-migration.ts",
+    "db:generate": "node scripts/generate-types.js",
+    "fetch-models": "tsx scripts/fetch-replicate-models.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.932.0",
@@ -27,16 +28,21 @@
     "@sentry/node": "^7.91.0",
     "@types/multer": "^2.0.0",
     "aws-jwt-verify": "^5.1.1",
+    "bullmq": "^5.63.2",
     "dotenv": "^16.4.1",
     "fastify": "^4.25.2",
+    "fluent-ffmpeg": "^2.1.3",
     "jsonwebtoken": "^9.0.2",
     "jwks-rsa": "^3.2.0",
     "multer": "^2.0.2",
+    "openid-client": "^5.7.0",
     "pg": "^8.11.3",
     "redis": "^4.6.12",
+    "replicate": "^1.3.1",
     "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@types/fluent-ffmpeg": "^2.1.28",
     "@types/node": "^20.11.5",
     "@types/pg": "^8.10.9",
     "@typescript-eslint/eslint-plugin": "^6.19.0",

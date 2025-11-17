@@ -9,8 +9,14 @@ import { config } from './config';
 import { healthRoutes } from './routes/health';
 import { projectRoutes } from './routes/projects';
 import { assetRoutes } from './routes/assets';
+import { jobRoutes } from './routes/jobs';
+import { authRoutes } from './routes/auth';
+import { chatRoutes } from './routes/chat';
 import multipart from '@fastify/multipart';
 import { setFastifyInstance } from './middleware/cognito';
+import { testConnection } from './services/database';
+// Redis/job queue is disabled - using synchronous generation instead
+// Worker import removed - all video generation is now synchronous via /api/projects/:id/generate-sync
 
 // Initialize Sentry
 if (config.sentry.dsn) {
@@ -40,19 +46,44 @@ setFastifyInstance(fastify);
 
 // Register plugins
 async function registerPlugins() {
-  // CORS
+  // CORS - must be registered FIRST, before other plugins
+  // Convert readonly array to regular array and log for debugging
+  const allowedOriginsArray = Array.from(config.allowedOrigins);
+  fastify.log.info({ allowedOrigins: allowedOriginsArray, frontendUrl: config.frontendUrl, nodeEnv: config.nodeEnv }, 'CORS configuration');
+  
   await fastify.register(cors, {
-    origin: config.frontendUrl,
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (allowedOriginsArray.includes(origin)) {
+        return callback(null, true);
+      }
+      fastify.log.warn({ origin, allowedOrigins: allowedOriginsArray }, 'CORS: Origin not allowed');
+      return callback(new Error('Not allowed by CORS'), false);
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['Content-Type', 'Authorization'],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
+    strictPreflight: false,
   });
 
-  // Security headers
-  await fastify.register(helmet);
+  // Security headers - configure to allow CORS
+  await fastify.register(helmet, {
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: false, // Disable CSP to avoid CORS issues
+  });
 
   // Rate limiting
   await fastify.register(rateLimit, {
     max: config.rateLimit.maxRequests,
     timeWindow: config.rateLimit.windowMs,
+    skipOnError: true,
   });
 
   // Multipart form data support
@@ -89,8 +120,11 @@ async function registerPlugins() {
 // Register routes
 async function registerRoutes() {
   await fastify.register(healthRoutes);
+  await fastify.register(authRoutes, { prefix: '/api' });
   await fastify.register(projectRoutes, { prefix: '/api' });
   await fastify.register(assetRoutes, { prefix: '/api' });
+  await fastify.register(jobRoutes, { prefix: '/api' });
+  await fastify.register(chatRoutes, { prefix: '/api' });
 }
 
 // Error handler
@@ -118,6 +152,16 @@ fastify.setErrorHandler((error, request, reply) => {
 // Start server
 async function start() {
   try {
+    // Test database connection
+    fastify.log.info('Testing database connection...');
+    const dbConnected = await testConnection();
+    if (!dbConnected) {
+      fastify.log.warn('⚠️  Database connection failed. Server will start but database operations will fail.');
+      fastify.log.warn('Please check your DATABASE_URL in backend/.env and ensure RDS is configured.');
+    } else {
+      fastify.log.info('✓ Database connection successful');
+    }
+
     await registerPlugins();
     await registerRoutes();
 

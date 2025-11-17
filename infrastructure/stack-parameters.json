@@ -1,0 +1,15 @@
+[
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-0210b3311f28724d3"
+  },
+  {
+    "ParameterKey": "SubnetIds",
+    "ParameterValue": "subnet-0293da9700388af18,subnet-0493e519f60c846db"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "arn:aws:acm:us-west-2:971422717446:certificate/2ea3f54e-ca55-4f8b-854c-9782646f025f"
+  }
+]
+

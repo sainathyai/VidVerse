@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify';
-import { generateUploadUrl, uploadFile } from '../services/storage';
+import { generateUploadUrl, uploadFile, generateDownloadUrl } from '../services/storage';
 import { getCognitoUser } from '../middleware/cognito';
 import { authenticateCognito } from '../middleware/cognito';
 import { z } from 'zod';
@@ -55,6 +55,7 @@ export async function assetRoutes(fastify: FastifyInstance, options: FastifyPlug
       uploadUrl: result.uploadUrl,
       key: result.key,
       publicUrl: result.publicUrl,
+      contentType: data.contentType,
     };
   });
 
@@ -97,6 +98,189 @@ export async function assetRoutes(fastify: FastifyInstance, options: FastifyPlug
       key: result.key,
       bucket: result.bucket,
     };
+  });
+
+  // Generate presigned URL for downloading/viewing a file
+  fastify.get('/assets/download-url', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Get a presigned URL for downloading/viewing a file',
+      tags: ['assets'],
+      querystring: {
+        type: 'object',
+        required: ['key'],
+        properties: {
+          key: { type: 'string' },
+          expiresIn: { type: 'number', default: 3600 },
+        },
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            downloadUrl: { type: 'string' },
+          },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { key, expiresIn = 3600 } = request.query as { key: string; expiresIn?: number };
+    
+    const downloadUrl = await generateDownloadUrl(key, expiresIn);
+    
+    return {
+      downloadUrl,
+    };
+  });
+
+  // Get all assets for a project
+  fastify.get('/projects/:projectId/assets', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Get all assets for a project',
+      tags: ['assets'],
+      params: {
+        type: 'object',
+        required: ['projectId'],
+        properties: {
+          projectId: { type: 'string', format: 'uuid' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { projectId } = request.params as { projectId: string };
+    const user = getCognitoUser(request);
+    const { query } = await import('../services/database');
+
+    // Verify project belongs to user
+    const project = await query(
+      'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
+      [projectId, user.sub]
+    );
+
+    if (!project || project.length === 0) {
+      return reply.code(404).send({ error: 'Project not found' });
+    }
+
+    // Get all assets for the project
+    const assets = await query(
+      `SELECT id, type, url, filename, metadata, created_at
+       FROM assets
+       WHERE project_id = $1
+       ORDER BY created_at ASC`,
+      [projectId]
+    );
+
+    return assets.map((asset: any) => ({
+      id: asset.id,
+      type: asset.type,
+      url: asset.url,
+      filename: asset.filename || '',
+      thumbnail: asset.type === 'image' ? asset.url : undefined,
+      metadata: asset.metadata || {},
+    }));
+  });
+
+  // Save asset for a project
+  fastify.post('/projects/:projectId/assets', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Save an asset for a project',
+      tags: ['assets'],
+      params: {
+        type: 'object',
+        required: ['projectId'],
+        properties: {
+          projectId: { type: 'string', format: 'uuid' },
+        },
+      },
+      body: {
+        type: 'object',
+        required: ['type', 'url'],
+        properties: {
+          type: { type: 'string', enum: ['audio', 'image', 'video', 'brand_kit'] },
+          url: { type: 'string' },
+          filename: { type: 'string' },
+          metadata: { type: 'object' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { projectId } = request.params as { projectId: string };
+    const user = getCognitoUser(request);
+    const body = request.body as { type: string; url: string; filename?: string; metadata?: any };
+    const { query } = await import('../services/database');
+
+    // Verify project belongs to user
+    const project = await query(
+      'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
+      [projectId, user.sub]
+    );
+
+    if (!project || project.length === 0) {
+      return reply.code(404).send({ error: 'Project not found' });
+    }
+
+    // Insert asset
+    const result = await query(
+      `INSERT INTO assets (project_id, type, url, filename, metadata)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, type, url, filename, metadata, created_at`,
+      [
+        projectId,
+        body.type,
+        body.url,
+        body.filename || null,
+        JSON.stringify(body.metadata || {}),
+      ]
+    );
+
+    const asset = result[0];
+    return {
+      id: asset.id,
+      type: asset.type,
+      url: asset.url,
+      filename: asset.filename || '',
+      thumbnail: asset.type === 'image' ? asset.url : undefined,
+      metadata: asset.metadata || {},
+    };
+  });
+
+  // Delete an asset
+  fastify.delete('/assets/:assetId', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Delete an asset',
+      tags: ['assets'],
+      params: {
+        type: 'object',
+        required: ['assetId'],
+        properties: {
+          assetId: { type: 'string', format: 'uuid' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { assetId } = request.params as { assetId: string };
+    const user = getCognitoUser(request);
+    const { query } = await import('../services/database');
+
+    // Verify asset belongs to user's project
+    const asset = await query(
+      `SELECT a.id FROM assets a
+       JOIN projects p ON a.project_id = p.id
+       WHERE a.id = $1 AND p.user_id = $2`,
+      [assetId, user.sub]
+    );
+
+    if (!asset || asset.length === 0) {
+      return reply.code(404).send({ error: 'Asset not found' });
+    }
+
+    // Delete asset
+    await query('DELETE FROM assets WHERE id = $1', [assetId]);
+
+    return { success: true };
   });
 }
 

@@ -1,84 +1,30 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-:root {
-  /* Modern dark theme colors */
-  --background: hsl(222, 47%, 11%);
-  --foreground: hsl(210, 40%, 98%);
-  --surface: hsl(222, 47%, 14%);
-  --surface-hover: hsl(222, 47%, 18%);
-  --muted: hsl(215, 20%, 65%);
-  
-  /* Primary colors */
-  --primary-50: hsl(215, 100%, 97%);
-  --primary-100: hsl(215, 100%, 94%);
-  --primary-200: hsl(215, 100%, 88%);
-  --primary-300: hsl(215, 100%, 80%);
-  --primary-400: hsl(215, 100%, 65%);
-  --primary-500: hsl(215, 100%, 50%);
-  --primary-600: hsl(215, 100%, 45%);
-  --primary-700: hsl(215, 100%, 40%);
-  --primary-800: hsl(215, 100%, 30%);
-  --primary-900: hsl(215, 100%, 20%);
-  
-  /* Accent colors */
-  --secondary: hsl(280, 90%, 60%);
-  --success: hsl(142, 76%, 36%);
-  --danger: hsl(0, 84%, 60%);
-  
-  /* Gradient colors */
-  --purple-400: hsl(280, 90%, 70%);
-  --pink-400: hsl(330, 90%, 70%);
-}
-
-@theme {
-  /* Core theme colors - mapped to CSS variables */
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-surface: var(--surface);
-  --color-surface-hover: var(--surface-hover);
-  --color-muted: var(--muted);
-  
-  /* Black and white colors */
-  --color-black: #000000;
-  --color-white: #ffffff;
-  
-  /* Primary color scale */
-  --color-primary-50: var(--primary-50);
-  --color-primary-100: var(--primary-100);
-  --color-primary-200: var(--primary-200);
-  --color-primary-300: var(--primary-300);
-  --color-primary-400: var(--primary-400);
-  --color-primary-500: var(--primary-500);
-  --color-primary-600: var(--primary-600);
-  --color-primary-700: var(--primary-700);
-  --color-primary-800: var(--primary-800);
-  --color-primary-900: var(--primary-900);
-  
-  /* Accent colors */
-  --color-secondary: var(--secondary);
-  --color-success: var(--success);
-  --color-danger: var(--danger);
-  
-  /* Gradient colors */
-  --color-purple-400: var(--purple-400);
-  --color-pink-400: var(--pink-400);
-  
-  /* Neutral colors for gradients */
-  --color-neutral-50: #fafafa;
-  --color-neutral-100: #f5f5f5;
-  --color-neutral-200: #e5e5e5;
-  --color-neutral-300: #d4d4d4;
-  --color-neutral-400: #a3a3a3;
-  --color-neutral-500: #737373;
-  --color-neutral-600: #525252;
-  --color-neutral-700: #404040;
-  --color-neutral-800: #262626;
-  --color-neutral-900: #171717;
-  --color-neutral-950: #0a0a0a;
-  
-  /* Fonts */
-  --font-sans: system-ui, -apple-system, sans-serif;
-  --font-mono: 'Courier New', monospace;
+@layer base {
+  :root {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+    --radius: 0.5rem;
+  }
 }
 
 * {
@@ -87,14 +33,15 @@
   box-sizing: border-box;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  margin: 0;
-  padding: 0;
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
 }
 
 /* Smooth scrolling */
@@ -109,16 +56,35 @@ html {
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--surface);
+  background: hsl(var(--background));
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--muted);
+  background: hsl(var(--muted));
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--primary-500);
+  background: hsl(var(--primary));
+}
+
+/* Custom scrollbar for dropdowns */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
 
 /* Animations */
@@ -202,11 +168,200 @@ html {
   }
 }
 
+@keyframes slide-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slide-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes float-delayed {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(-30px, 30px) scale(1.1);
+  }
+  66% {
+    transform: translate(30px, -30px) scale(0.9);
+  }
+}
+
+@keyframes float-slow {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+  }
+  50% {
+    transform: translate(20px, -20px) scale(1.05);
+  }
+}
+
+.animate-slide-in-left {
+  animation: slide-in-left 0.6s ease-out;
+}
+
+.animate-slide-in-up {
+  animation: slide-in-up 0.6s ease-out;
+}
+
+.animate-float {
+  animation: float 20s ease-in-out infinite;
+}
+
+.animate-float-delayed {
+  animation: float-delayed 25s ease-in-out infinite;
+}
+
+.animate-float-slow {
+  animation: float-slow 30s ease-in-out infinite;
+}
+
+.animate-gradient-shift {
+  background-size: 200% 200%;
+  animation: gradient-shift 15s ease infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s infinite;
+}
+
 .animate-scale-in {
-  animation: scaleIn 0.3s ease-out;
+  animation: scaleIn 0.2s ease-out;
+}
+
+@keyframes scaleInFromBottom {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-scale-in-bottom {
+  animation: scaleInFromBottom 0.2s ease-out;
 }
 
 .animate-pulse-slow {
   animation: pulse-slow 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Utility classes for custom colors with opacity - Tailwind v4 compatibility */
+.bg-surface {
+  background-color: hsl(222, 47%, 14%);
+}
+
+.bg-surface\/80 {
+  background-color: hsla(222, 47%, 14%, 0.8);
+}
+
+.bg-surface\/60 {
+  background-color: hsla(222, 47%, 14%, 0.6);
+}
+
+.bg-surface\/40 {
+  background-color: hsla(222, 47%, 14%, 0.4);
+}
+
+.bg-primary-500\/20 {
+  background-color: hsla(215, 100%, 50%, 0.2);
+}
+
+.bg-primary-500\/10 {
+  background-color: hsla(215, 100%, 50%, 0.1);
+}
+
+.bg-primary-500\/5 {
+  background-color: hsla(215, 100%, 50%, 0.05);
+}
+
+.bg-success\/20 {
+  background-color: hsla(142, 76%, 36%, 0.2);
+}
+
+.bg-danger\/20 {
+  background-color: hsla(0, 84%, 60%, 0.2);
+}
+
+.text-muted {
+  color: hsl(215, 20%, 65%);
+}
+
+.text-primary-400 {
+  color: hsl(215, 100%, 65%);
+}
+
+.text-primary-300 {
+  color: hsl(215, 100%, 80%);
+}
+
+.border-primary-500\/30 {
+  border-color: hsla(215, 100%, 50%, 0.3);
+}
+
+.border-primary-500\/40 {
+  border-color: hsla(215, 100%, 50%, 0.4);
+}
+
+.border-primary-500\/60 {
+  border-color: hsla(215, 100%, 50%, 0.6);
+}
+
+.border-success\/30 {
+  border-color: hsla(142, 76%, 36%, 0.3);
+}
+
+.border-danger\/30 {
+  border-color: hsla(0, 84%, 60%, 0.3);
+}
+
+.shadow-primary-500\/30 {
+  box-shadow: 0 10px 15px -3px hsla(215, 100%, 50%, 0.3), 0 4px 6px -2px hsla(215, 100%, 50%, 0.3);
+}
+
+.shadow-primary-500\/40 {
+  box-shadow: 0 20px 25px -5px hsla(215, 100%, 50%, 0.4), 0 10px 10px -5px hsla(215, 100%, 50%, 0.4);
+}
+
+.shadow-primary-500\/20 {
+  box-shadow: 0 10px 15px -3px hsla(215, 100%, 50%, 0.2), 0 4px 6px -2px hsla(215, 100%, 50%, 0.2);
+}
+
+.shadow-primary-500\/10 {
+  box-shadow: 0 10px 15px -3px hsla(215, 100%, 50%, 0.1), 0 4px 6px -2px hsla(215, 100%, 50%, 0.1);
+}
+
+.ring-primary-500\/20 {
+  --tw-ring-color: hsla(215, 100%, 50%, 0.2);
+}
+
+.ring-primary-500\/30 {
+  --tw-ring-color: hsla(215, 100%, 50%, 0.3);
 }
 

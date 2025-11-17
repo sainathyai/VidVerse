@@ -1,10 +1,11 @@
 import { z } from "zod";
 
 export const projectSchema = z.object({
+  name: z.string().min(1, "Project name is required").max(100, "Project name must be less than 100 characters"),
   category: z.enum(["music_video", "ad_creative", "explainer"], {
     required_error: "Please select a category",
   }),
-  prompt: z.string().min(10, "Prompt must be at least 10 characters").max(1000, "Prompt must be less than 1000 characters"),
+  prompt: z.string().min(10, "Prompt must be at least 10 characters"),
   duration: z.number().min(15, "Duration must be at least 15 seconds").max(300, "Duration must be less than 5 minutes"),
   style: z.string().optional(),
   mood: z.string().optional(),
