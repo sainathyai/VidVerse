@@ -407,9 +407,14 @@ export async function generateVideo(
           
           // Handle model-specific parameters
           const isSora2 = model.id === 'openai/sora-2';
-          const isVeo3 = model.id === 'google/veo-3' || model.id === 'google/veo-3.1' || model.id === 'google/veo-3-fast';
+          const isVeo3Fast = model.id === 'google/veo-3-fast';
+          const isVeo3 = model.id === 'google/veo-3' || model.id === 'google/veo-3.1';
           
-          if (isSora2) {
+          if (isVeo3Fast) {
+            // Veo 3 Fast format: prompt and enhance_prompt (boolean)
+            modelInput.enhance_prompt = true; // Default to true, can be made configurable later
+            console.log(`[REPLICATE] Adding Veo 3 Fast parameters: enhance_prompt=${modelInput.enhance_prompt}`);
+          } else if (isSora2) {
             // Sora-2 format: aspect_ratio as "portrait" or "landscape", seconds as 4/8/12
             let soraAspectRatio: string;
             if (aspectRatio) {
