@@ -454,7 +454,10 @@ export async function generateVideo(
             modelInput.seconds = soraSeconds;
             console.log(`[REPLICATE] Setting seconds parameter for Sora-2: ${soraSeconds} (requested: ${duration})`);
           } else if (isVeo3) {
-            // Veo 3/3.1 format: duration, resolution, aspect_ratio as "16:9", generate_audio, reference_images
+            // Veo 3/3.1 format: prompt, aspect_ratio, duration, resolution, generate_audio, image, negative_prompt, seed
+            // Veo 3.1 also supports: reference_images (array), last_frame
+            const isVeo31 = model.id === 'google/veo-3.1';
+            
             // Normalize aspect ratio to "W:H" format (e.g., "16:9", "9:16", "1:1")
             let veoAspectRatio: string;
             if (aspectRatio) {
@@ -466,38 +469,46 @@ export async function generateVideo(
               veoAspectRatio = '16:9'; // Default to 16:9 landscape
             }
             
+            // Required parameters
             modelInput.aspect_ratio = veoAspectRatio;
             modelInput.duration = Math.min(duration, 60); // Veo supports up to 60 seconds
-            modelInput.resolution = '1080p'; // Default to 1080p, can be made configurable later
-            modelInput.generate_audio = false; // Default to false, can be made configurable later
+            modelInput.resolution = '1080p'; // Default to 1080p
+            modelInput.generate_audio = true; // Default to true (as per Veo 3 API)
             
-            // Add optional Veo 3.1 parameters
+            // Optional parameters - image (reference image)
             if (options.image) {
               modelInput.image = options.image;
-              console.log(`[REPLICATE] Adding image parameter for Veo 3.1: ${options.image}`);
+              console.log(`[REPLICATE] Adding image parameter for Veo 3: ${options.image}`);
             }
             
-            if (options.lastFrame) {
-              modelInput.last_frame = options.lastFrame;
-              console.log(`[REPLICATE] Adding last_frame parameter for Veo 3.1: ${options.lastFrame}`);
-            }
-            
+            // Optional parameters - negative_prompt
             if (options.negativePrompt) {
               modelInput.negative_prompt = options.negativePrompt;
-              console.log(`[REPLICATE] Adding negative_prompt parameter for Veo 3.1`);
+              console.log(`[REPLICATE] Adding negative_prompt parameter for Veo 3`);
             }
             
+            // Optional parameters - seed
             if (options.seed !== undefined && options.seed !== null) {
               modelInput.seed = options.seed;
-              console.log(`[REPLICATE] Adding seed parameter for Veo 3.1: ${options.seed}`);
+              console.log(`[REPLICATE] Adding seed parameter for Veo 3: ${options.seed}`);
             }
             
-            console.log(`[REPLICATE] Adding Veo 3 parameters: aspect_ratio=${veoAspectRatio}, duration=${modelInput.duration}, resolution=${modelInput.resolution}`);
+            // Veo 3.1 specific parameters
+            if (isVeo31) {
+              // Veo 3.1 supports last_frame for video continuation
+              if (options.lastFrame) {
+                modelInput.last_frame = options.lastFrame;
+                console.log(`[REPLICATE] Adding last_frame parameter for Veo 3.1: ${options.lastFrame}`);
+              }
+              
+              // Veo 3.1 supports reference_images (array of URLs)
+              // TODO: Add support for reference_images if provided in options
+              // if (options.referenceImages && Array.isArray(options.referenceImages)) {
+              //   modelInput.reference_images = options.referenceImages;
+              // }
+            }
             
-            // TODO: Add support for reference_images if provided in options
-            // if (options.referenceImages && Array.isArray(options.referenceImages)) {
-            //   modelInput.reference_images = options.referenceImages;
-            // }
+            console.log(`[REPLICATE] Adding Veo 3 parameters: aspect_ratio=${veoAspectRatio}, duration=${modelInput.duration}, resolution=${modelInput.resolution}, generate_audio=${modelInput.generate_audio}`);
           } else if (aspectRatio) {
             // For other models, log that aspect_ratio is not supported
             console.log(`[REPLICATE] Model ${model.id} does not support aspect_ratio parameter, ignoring`);
