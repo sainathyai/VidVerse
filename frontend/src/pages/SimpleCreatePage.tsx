@@ -809,17 +809,47 @@ function SimpleCreateContent() {
       } catch (genError: any) {
         clearInterval(progressInterval);
         console.error('Video generation error:', genError);
+        
         // Extract error message from various possible error formats
-        const errorMessage = genError?.response?.data?.message 
-          || genError?.message 
-          || genError?.error?.message
-          || (typeof genError === 'string' ? genError : 'Video generation failed. Please try again.');
-        console.error('Error details:', {
+        // apiRequest uses fetch API, so errors have different structure than axios
+        let errorMessage = 'Video generation failed. Please try again.';
+        
+        if (typeof genError === 'string') {
+          errorMessage = genError;
+        } else if (genError?.message) {
+          errorMessage = genError.message;
+        } else if (genError?.error?.message) {
+          errorMessage = genError.error.message;
+        } else if (genError?.response?.data?.message) {
+          errorMessage = genError.response.data.message;
+        }
+        
+        // Handle "Failed to fetch" - network/CORS error
+        if (errorMessage === 'Failed to fetch' || genError?.message === 'Failed to fetch') {
+          errorMessage = 'Network error: Unable to connect to the server. Please check your connection and try again.';
+        }
+        
+        // Log error details in a serializable format
+        const errorDetails: Record<string, any> = {
           message: errorMessage,
-          status: genError?.response?.status,
-          data: genError?.response?.data,
-          fullError: genError
-        });
+          errorType: genError?.constructor?.name || typeof genError,
+        };
+        
+        // Safely extract error properties
+        if (genError?.statusCode) {
+          errorDetails.statusCode = genError.statusCode;
+        }
+        if (genError?.response?.status) {
+          errorDetails.status = genError.response.status;
+        }
+        if (genError?.response?.data) {
+          errorDetails.responseData = genError.response.data;
+        }
+        if (genError?.stack) {
+          errorDetails.stack = genError.stack.split('\n').slice(0, 5).join('\n');
+        }
+        
+        console.error('Error details:', errorDetails);
         setGenerationError(errorMessage);
         setProgress(0);
       }

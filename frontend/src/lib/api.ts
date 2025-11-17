@@ -76,23 +76,50 @@ export async function apiRequest<T>(
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      ...options,
+      headers,
+    });
+  } catch (fetchError: any) {
+    // Handle network errors (CORS, connection refused, etc.)
+    const errorObj = new Error(
+      fetchError?.message === 'Failed to fetch' 
+        ? 'Network error: Unable to connect to the server. Please check your connection and try again.'
+        : fetchError?.message || 'Network request failed'
+    );
+    (errorObj as any).statusCode = 0;
+    (errorObj as any).isNetworkError = true;
+    throw errorObj;
+  }
 
   if (!response.ok) {
-    const error: ApiError = await response.json().catch(() => ({
-      message: `HTTP error! status: ${response.status}`,
-      statusCode: response.status,
-    }));
+    let error: ApiError;
+    try {
+      const errorData = await response.json();
+      error = {
+        message: errorData.message || errorData.error?.message || `HTTP error! status: ${response.status}`,
+        statusCode: errorData.statusCode || response.status,
+      };
+    } catch (parseError) {
+      // If response is not JSON, create a basic error
+      error = {
+        message: `HTTP error! status: ${response.status}`,
+        statusCode: response.status,
+      };
+    }
     
     // Automatically handle 401 errors by redirecting to login
     if (error.statusCode === 401) {
       handleAuthError(401);
     }
     
-    throw error;
+    // Create an Error object with the ApiError properties for better stack traces
+    const errorObj = new Error(error.message);
+    (errorObj as any).statusCode = error.statusCode;
+    (errorObj as any).response = { status: error.statusCode, data: { message: error.message } };
+    throw errorObj;
   }
 
   // Handle 204 No Content responses (no body to parse)
