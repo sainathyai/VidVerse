@@ -183,38 +183,179 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
       : (projectData.config || {});
 
     try {
-      // Import script generation functions
-      const { parsePrompt } = await import('../services/promptParser');
-      const { planScenes } = await import('../services/scenePlanner');
+      // Check if OpenRouter API key is configured
+      const { config: appConfig } = await import('../config');
+      if (!appConfig.openrouter.apiKey) {
+        return reply.code(503).send({
+          error: 'OpenRouter API key not configured',
+          message: 'Please set OPENROUTER_API_KEY in your environment variables',
+        });
+      }
 
-      // Parse prompt
-      const parsedPrompt = parsePrompt(projectData.prompt, config.duration || 60);
-      if (config.style) parsedPrompt.style = config.style;
-      if (config.mood) parsedPrompt.mood = config.mood;
+      const duration = config.duration || 60;
+      const videoDuration = duration; // Duration in seconds
 
-      // Plan scenes
-      const scenes = planScenes(projectData.prompt, parsedPrompt, config.duration || 60);
+      // Build comprehensive prompt for elaborate script generation
+      const systemPrompt = `You are an expert video script writer specializing in creating highly detailed, elaborate video scripts for AI video generation. Your task is to create an extremely detailed script with approximately 10,000 words that breaks down a video concept into multiple scenes with rich, vivid descriptions.
 
-      // Format script with scene breakdown
-      const script = {
-        overallPrompt: projectData.prompt,
-        parsedPrompt: {
-          style: parsedPrompt.style,
-          mood: parsedPrompt.mood,
-          duration: parsedPrompt.duration,
-          keywords: parsedPrompt.keywords,
+CRITICAL REQUIREMENTS:
+1. Generate approximately 10,000 words of detailed script content
+2. Break the video into multiple scenes (typically 5-10 scenes for a ${videoDuration}-second video)
+3. Each scene must have:
+   - Detailed visual descriptions (camera angles, movements, lighting, composition)
+   - Specific visual elements, colors, textures, and details
+   - Precise timing (startTime and endTime in seconds)
+   - Scene duration that adds up to the total video duration
+   - Elaborate prompt descriptions suitable for AI video generation
+4. Include overall creative direction, mood, style, and pacing
+5. Output MUST be valid JSON format matching the exact structure specified below
+
+OUTPUT FORMAT (JSON):
+{
+  "overallPrompt": "The original user prompt",
+  "parsedPrompt": {
+    "style": "Detailed style description",
+    "mood": "Detailed mood description",
+    "duration": ${videoDuration},
+    "keywords": ["keyword1", "keyword2", ...]
+  },
+  "scenes": [
+    {
+      "sceneNumber": 1,
+      "prompt": "Extremely detailed, elaborate scene description (500-2000 words) with specific visual details, camera movements, lighting, colors, textures, composition, and all visual elements needed for AI video generation",
+      "duration": X.X,
+      "startTime": X.X,
+      "endTime": X.X
+    },
+    ...
+  ]
+}
+
+IMPORTANT: 
+- Each scene prompt should be extremely detailed and elaborate (500-2000 words each)
+- Total word count should be approximately 10,000 words
+- Scene durations must add up exactly to ${videoDuration} seconds
+- Be creative, vivid, and specific in your descriptions
+- Focus on visual details that will help AI video generation models create stunning visuals`;
+
+      const userPrompt = `Create an elaborate, detailed video script for the following concept:
+
+PROJECT DETAILS:
+- Category: ${projectData.category || 'General'}
+- Original Prompt: ${projectData.prompt}
+- Duration: ${videoDuration} seconds
+${config.style ? `- Style: ${config.style}` : ''}
+${config.mood ? `- Mood: ${config.mood}` : ''}
+${config.aspectRatio ? `- Aspect Ratio: ${config.aspectRatio}` : ''}
+${config.colorPalette ? `- Color Palette: ${config.colorPalette}` : ''}
+${config.pacing ? `- Pacing: ${config.pacing}` : ''}
+
+Generate an elaborate script with approximately 10,000 words, breaking this into multiple detailed scenes. Each scene should have rich, vivid descriptions perfect for AI video generation. Include specific details about camera movements, lighting, colors, textures, composition, and all visual elements.`;
+
+      // Call OpenRouter API with Claude Sonnet 4.5
+      const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${appConfig.openrouter.apiKey}`,
+          'HTTP-Referer': appConfig.app.frontendUrl || 'https://vidverseai.com',
+          'X-Title': 'VidVerse AI Script Generator',
         },
-        scenes: scenes.map(scene => ({
-          sceneNumber: scene.sceneNumber,
-          prompt: scene.prompt,
-          duration: scene.duration,
-          startTime: scene.startTime,
-          endTime: scene.endTime,
-        })),
-      };
+        body: JSON.stringify({
+          model: 'anthropic/claude-4.5-sonnet',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.8,
+          max_tokens: 16000, // Allow for 10,000+ word responses
+        }),
+      });
 
+      if (!openrouterResponse.ok) {
+        const errorText = await openrouterResponse.text();
+        let errorMessage = 'Failed to generate script. Please try again.';
+        
+        try {
+          const errorData = JSON.parse(errorText);
+          if (errorData.error?.message) {
+            errorMessage = errorData.error.message;
+          }
+        } catch {
+          // Use default error message
+        }
+
+        fastify.log.error({ 
+          status: openrouterResponse.status,
+          error: errorText,
+          projectId 
+        }, 'OpenRouter API error during script generation');
+        
+        return reply.code(502).send({
+          error: 'Script generation failed',
+          message: errorMessage,
+        });
+      }
+
+      const openrouterData = await openrouterResponse.json();
+
+      if (!openrouterData.choices || !openrouterData.choices[0]) {
+        return reply.code(502).send({
+          error: 'Invalid response from AI service',
+          message: 'The AI service returned an invalid response format',
+        });
+      }
+
+      const aiResponse = openrouterData.choices[0].message.content;
+
+      // Try to extract JSON from the response (it might be wrapped in markdown code blocks)
+      let scriptJson: any;
+      try {
+        // Try to parse as-is first
+        scriptJson = JSON.parse(aiResponse);
+      } catch (parseError) {
+        // Try to extract JSON from markdown code blocks
+        const jsonMatch = aiResponse.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+        if (jsonMatch && jsonMatch[1]) {
+          try {
+            scriptJson = JSON.parse(jsonMatch[1]);
+          } catch (e) {
+            // If still fails, try to find JSON object in the text
+            const jsonObjectMatch = aiResponse.match(/\{[\s\S]*\}/);
+            if (jsonObjectMatch) {
+              scriptJson = JSON.parse(jsonObjectMatch[0]);
+            } else {
+              throw new Error('Could not extract JSON from AI response');
+            }
+          }
+        } else {
+          throw parseError;
+        }
+      }
+
+      // Validate and format the response
+      if (!scriptJson.scenes || !Array.isArray(scriptJson.scenes)) {
+        return reply.code(502).send({
+          error: 'Invalid script format',
+          message: 'The generated script does not have the required scene structure',
+        });
+      }
+
+      // Ensure all scenes have required fields
+      const scenes = scriptJson.scenes.map((scene: any, index: number) => ({
+        sceneNumber: scene.sceneNumber || index + 1,
+        prompt: scene.prompt || '',
+        duration: scene.duration || 0,
+        startTime: scene.startTime || 0,
+        endTime: scene.endTime || 0,
+      }));
+
+      // Ensure overallPrompt is set
+      scriptJson.overallPrompt = scriptJson.overallPrompt || projectData.prompt;
+
+      // Return the script
       return {
-        script: JSON.stringify(script, null, 2),
+        script: JSON.stringify(scriptJson, null, 2),
         scenes: scenes,
       };
     } catch (error: any) {
