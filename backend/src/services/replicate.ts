@@ -344,37 +344,26 @@ export async function generateVideo(
   
   // Fetch all models to get details for the selected model
   const allVideoModels = await fetchVideoGenerationModels();
-  let selectedModel = allVideoModels.find(m => m.id === selectedModelId);
-  
-  // Special handling: If google/veo-3.1 is requested but not available, fall back to google/veo-3
-  if (!selectedModel && selectedModelId === 'google/veo-3.1') {
-    console.warn(`[REPLICATE] Model google/veo-3.1 not available, falling back to google/veo-3`);
-    selectedModel = allVideoModels.find(m => m.id === 'google/veo-3');
-    if (selectedModel) {
-      console.log(`[REPLICATE] Using fallback model: google/veo-3 (${selectedModel.name})`);
-    }
-  }
+  const selectedModel = allVideoModels.find(m => m.id === selectedModelId);
   
   if (selectedModel) {
     videoGenerationModels = [selectedModel];
     console.log(`[REPLICATE] Using model: ${selectedModel.id} (${selectedModel.name})`);
   } else {
-    // Fallback: try to find model in fallback list
-    let fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === selectedModelId);
-    
-    // Special handling: If google/veo-3.1 is requested but not in fallback, use google/veo-3
-    if (!fallbackModel && selectedModelId === 'google/veo-3.1') {
-      console.warn(`[REPLICATE] Model google/veo-3.1 not in fallback list, using google/veo-3`);
-      fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === 'google/veo-3');
-    }
+    // Check fallback list
+    const fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === selectedModelId);
     
     if (fallbackModel) {
       videoGenerationModels = [fallbackModel];
       console.log(`[REPLICATE] Using fallback model: ${fallbackModel.id} (${fallbackModel.name})`);
     } else {
-      // Last resort: use first available model
-      console.warn(`[REPLICATE] Model ${selectedModelId} not found, using first available model`);
-      videoGenerationModels = allVideoModels.length > 0 ? [allVideoModels[0]] : FALLBACK_VIDEO_MODELS.slice(0, 1);
+      // Model not found - return error instead of using a different model
+      console.error(`[REPLICATE] Model ${selectedModelId} not found in available models or fallback list`);
+      return {
+        output: '',
+        status: 'failed',
+        error: `MODEL_NOT_FOUND: Model ${selectedModelId} is not available. Please select a different model.`,
+      };
     }
   }
   
