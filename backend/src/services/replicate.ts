@@ -566,6 +566,36 @@ export async function generateVideo(
             }
             
             console.log(`[REPLICATE] Adding Veo 3 parameters: aspect_ratio=${veoAspectRatio}, duration=${modelInput.duration}, resolution=${modelInput.resolution}, generate_audio=${modelInput.generate_audio}`);
+          } else if (isKling) {
+            // Kling 2.5 Turbo Pro format: prompt, aspect_ratio, duration, start_image (optional), negative_prompt (optional)
+            // Normalize aspect ratio to "W:H" format (e.g., "16:9", "9:16", "1:1")
+            let klingAspectRatio: string;
+            if (aspectRatio) {
+              const normalizedAspectRatio = aspectRatio.includes(':') 
+                ? aspectRatio 
+                : convertAspectRatioToRatio(aspectRatio);
+              klingAspectRatio = normalizedAspectRatio || '16:9';
+            } else {
+              klingAspectRatio = '16:9'; // Default to 16:9 landscape
+            }
+            
+            // Required parameters
+            modelInput.aspect_ratio = klingAspectRatio;
+            modelInput.duration = Math.min(duration, 60); // Kling supports up to 60 seconds
+            
+            // Optional parameters - start_image (first frame)
+            if (options.image) {
+              modelInput.start_image = options.image;
+              console.log(`[REPLICATE] Adding start_image parameter for Kling: ${options.image}`);
+            }
+            
+            // Optional parameters - negative_prompt
+            if (options.negativePrompt) {
+              modelInput.negative_prompt = options.negativePrompt;
+              console.log(`[REPLICATE] Adding negative_prompt parameter for Kling`);
+            }
+            
+            console.log(`[REPLICATE] Adding Kling parameters: aspect_ratio=${klingAspectRatio}, duration=${modelInput.duration}`);
           } else if (aspectRatio) {
             // For other models, log that aspect_ratio is not supported
             console.log(`[REPLICATE] Model ${model.id} does not support aspect_ratio parameter, ignoring`);
