@@ -31,7 +31,8 @@ function SimpleCreateContent() {
   const [duration, setDuration] = useState(15);
   const [colorPalette, setColorPalette] = useState("vibrant");
   const [pacing, setPacing] = useState("medium");
-  const [costPerSecond, setCostPerSecond] = useState(0.20);
+  const [videoModelId, setVideoModelId] = useState('google/veo-3.1');
+  const [imageModelId, setImageModelId] = useState('openai/dall-e-3');
   const [isCreating, setIsCreating] = useState(false);
   const [showConfirmationModal, setShowConfirmationModal] = useState(false);
   const [showProgressModal, setShowProgressModal] = useState(false);
@@ -105,12 +106,19 @@ function SimpleCreateContent() {
     { value: "slow", label: "Slow", description: "Cinematic" },
   ];
 
-  const costPerSecondOptions = [
-    { value: 0.02, label: "$0.02/sec", description: "Budget" },
-    { value: 0.05, label: "$0.05/sec", description: "Economy" },
-    { value: 0.20, label: "$0.20/sec", description: "Standard" },
-    { value: 0.50, label: "$0.50/sec", description: "Advanced" },
-    { value: 1.00, label: "$1.00/sec", description: "Premium" },
+  const videoModelOptions = [
+    { value: 'openai/sora-2-pro', label: 'Sora 2 Pro' },
+    { value: 'google/veo-3', label: 'Veo 3' },
+    { value: 'google/veo-3.1', label: 'Veo 3.1' },
+    { value: 'google/veo-3-fast', label: 'Veo 3 Fast' },
+    { value: 'openai/sora-2', label: 'Sora 2' },
+  ];
+
+  const imageModelOptions = [
+    { value: 'openai/dall-e-3', label: 'DALL-E 3' },
+    { value: 'google/nano-banana', label: 'Nano Banana' },
+    { value: 'google/imagen-4-ultra', label: 'Imagen 4 Ultra' },
+    { value: 'google/imagen-4', label: 'Imagen 4' },
   ];
 
   // Update prompt when category changes
@@ -363,7 +371,8 @@ function SimpleCreateContent() {
         duration,
         colorPalette,
         pacing,
-        costPerSecond,
+        videoModelId,
+        imageModelId,
         savedAt: new Date().toISOString(),
       };
 
@@ -383,7 +392,8 @@ function SimpleCreateContent() {
             aspectRatio,
             colorPalette,
             pacing,
-            costPerSecond,
+            videoModelId,
+        imageModelId,
             mode: 'classic',
           }),
         }, token);
@@ -453,7 +463,8 @@ function SimpleCreateContent() {
         if (draftData.duration) setDuration(draftData.duration);
         if (draftData.colorPalette) setColorPalette(draftData.colorPalette);
         if (draftData.pacing) setPacing(draftData.pacing);
-        if (draftData.costPerSecond !== undefined) setCostPerSecond(draftData.costPerSecond);
+        if (draftData.videoModelId) setVideoModelId(draftData.videoModelId);
+        if (draftData.imageModelId) setImageModelId(draftData.imageModelId);
         
         setCurrentProjectId(latestDraftProject.id);
         alert('Draft loaded successfully from S3!');
@@ -478,7 +489,8 @@ function SimpleCreateContent() {
         if (config.duration) setDuration(config.duration);
         if (config.colorPalette) setColorPalette(config.colorPalette);
         if (config.pacing) setPacing(config.pacing);
-        if (config.costPerSecond) setCostPerSecond(config.costPerSecond);
+        if (config.videoModelId) setVideoModelId(config.videoModelId);
+        if (config.imageModelId) setImageModelId(config.imageModelId);
         }
         
         setCurrentProjectId(latestDraftProject.id);
@@ -583,7 +595,8 @@ function SimpleCreateContent() {
           aspectRatio,
           colorPalette,
           pacing,
-          costPerSecond,
+          videoModelId,
+        imageModelId,
           mode: 'classic',
         }),
       }, token);
@@ -705,7 +718,8 @@ function SimpleCreateContent() {
             aspectRatio,
             colorPalette,
             pacing,
-            costPerSecond,
+            videoModelId,
+        imageModelId,
             mode: 'classic',
           }),
         }, token);
@@ -926,198 +940,233 @@ function SimpleCreateContent() {
                         ? "border-blue-500/50 bg-blue-500/10 shadow-lg shadow-blue-500/20"
                         : "border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/10"
                     }`}
-                    style={{ animationDelay: `${0.15 + idx * 0.05}s` }}
+                    style={{ maxWidth: '80px', maxHeight: '80px', animationDelay: `${0.15 + idx * 0.05}s` }}
                   >
-                    <span className="text-4xl mb-2">{cat.icon}</span>
-                    <span className="text-sm font-medium text-white">{cat.label}</span>
+                    <span className="text-2xl mb-1">{cat.icon}</span>
+                    <span className="text-xs font-medium text-white">{cat.label}</span>
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Visual Style */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.3s' }}>
-              <label htmlFor="style" className="block text-sm font-medium text-white/70 mb-2.5 uppercase tracking-wider">
-                Visual Style
-              </label>
-              <select
-                id="style"
-                value={style}
-                onChange={(e) => setStyle(e.target.value)}
-                className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg width='12' height='7' viewBox='0 0 12 7' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L6 6L11 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: 'no-repeat',
-                  backgroundPosition: 'right 0.625rem center',
-                  backgroundSize: '12px 7px',
-                  paddingRight: '2rem',
-                }}
-              >
-                {styleOptions.map((option) => (
-                  <option key={option.value} value={option.value} className="bg-neutral-900">
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+            {/* Visual Style + Mood - Row 1 */}
+            <div className="animate-fade-in flex gap-3" style={{ animationDelay: '0.3s' }}>
+              {/* Visual Style */}
+              <div className="flex-1">
+                <label htmlFor="style" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
+                  Visual Style
+                </label>
+                <select
+                  id="style"
+                  value={style}
+                  onChange={(e) => setStyle(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundSize: '10px 6px',
+                    paddingRight: '1.5rem',
+                  }}
+                >
+                  {styleOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="bg-neutral-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Mood */}
+              <div className="flex-1">
+                <label htmlFor="mood" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
+                  Mood
+                </label>
+                <select
+                  id="mood"
+                  value={mood}
+                  onChange={(e) => setMood(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundSize: '10px 6px',
+                    paddingRight: '1.5rem',
+                  }}
+                >
+                  {moodOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="bg-neutral-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
-            {/* Mood */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.35s' }}>
-              <label htmlFor="mood" className="block text-sm font-medium text-white/70 mb-2.5 uppercase tracking-wider">
-                Mood
-              </label>
-              <select
-                id="mood"
-                value={mood}
-                onChange={(e) => setMood(e.target.value)}
-                className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg width='12' height='7' viewBox='0 0 12 7' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L6 6L11 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: 'no-repeat',
-                  backgroundPosition: 'right 0.625rem center',
-                  backgroundSize: '12px 7px',
-                  paddingRight: '2rem',
-                }}
-              >
-                {moodOptions.map((option) => (
-                  <option key={option.value} value={option.value} className="bg-neutral-900">
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+            {/* Aspect Ratio + Duration - Row 2 */}
+            <div className="animate-fade-in flex gap-3" style={{ animationDelay: '0.4s' }}>
+              {/* Aspect Ratio */}
+              <div className="flex-1">
+                <label htmlFor="aspectRatio" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
+                  Aspect Ratio
+                </label>
+                <select
+                  id="aspectRatio"
+                  value={aspectRatio}
+                  onChange={(e) => setAspectRatio(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundSize: '10px 6px',
+                    paddingRight: '1.5rem',
+                  }}
+                >
+                  {aspectRatioOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="bg-neutral-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Duration */}
+              <div className="flex-1">
+                <label htmlFor="duration" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
+                  Duration
+                </label>
+                <select
+                  id="duration"
+                  value={duration}
+                  onChange={(e) => setDuration(Number(e.target.value))}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundSize: '10px 6px',
+                    paddingRight: '1.5rem',
+                  }}
+                >
+                  {durationOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="bg-neutral-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
-            {/* Aspect Ratio */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.4s' }}>
-              <label htmlFor="aspectRatio" className="block text-sm font-medium text-white/70 mb-2.5 uppercase tracking-wider">
-                Aspect Ratio
-              </label>
-              <select
-                id="aspectRatio"
-                value={aspectRatio}
-                onChange={(e) => setAspectRatio(e.target.value)}
-                className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg width='12' height='7' viewBox='0 0 12 7' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L6 6L11 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: 'no-repeat',
-                  backgroundPosition: 'right 0.625rem center',
-                  backgroundSize: '12px 7px',
-                  paddingRight: '2rem',
-                }}
-              >
-                {aspectRatioOptions.map((option) => (
-                  <option key={option.value} value={option.value} className="bg-neutral-900">
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+            {/* Color Palette + Pacing - Row 3 */}
+            <div className="animate-fade-in flex gap-3" style={{ animationDelay: '0.5s' }}>
+              {/* Color Palette */}
+              <div className="flex-1">
+                <label htmlFor="colorPalette" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
+                  Color Palette
+                </label>
+                <select
+                  id="colorPalette"
+                  value={colorPalette}
+                  onChange={(e) => setColorPalette(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundSize: '10px 6px',
+                    paddingRight: '1.5rem',
+                  }}
+                >
+                  {colorPaletteOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="bg-neutral-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Pacing */}
+              <div className="flex-1">
+                <label htmlFor="pacing" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
+                  Pacing
+                </label>
+                <select
+                  id="pacing"
+                  value={pacing}
+                  onChange={(e) => setPacing(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundSize: '10px 6px',
+                    paddingRight: '1.5rem',
+                  }}
+                >
+                  {pacingOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="bg-neutral-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
-            {/* Duration */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.45s' }}>
-              <label htmlFor="duration" className="block text-sm font-medium text-white/70 mb-2.5 uppercase tracking-wider">
-                Duration
-              </label>
-              <select
-                id="duration"
-                value={duration}
-                onChange={(e) => setDuration(Number(e.target.value))}
-                className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg width='12' height='7' viewBox='0 0 12 7' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L6 6L11 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: 'no-repeat',
-                  backgroundPosition: 'right 0.625rem center',
-                  backgroundSize: '12px 7px',
-                  paddingRight: '2rem',
-                }}
-              >
-                {durationOptions.map((option) => (
-                  <option key={option.value} value={option.value} className="bg-neutral-900">
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {/* Video and Image Models - Side by Side */}
+            <div className="animate-fade-in flex gap-3" style={{ animationDelay: '0.6s' }}>
+              {/* Video Models */}
+              <div className="flex-1">
+                <label htmlFor="videoModelId" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
+                  Video Models
+                </label>
+                <select
+                  id="videoModelId"
+                  value={videoModelId}
+                  onChange={(e) => setVideoModelId(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundSize: '10px 6px',
+                    paddingRight: '1.5rem',
+                  }}
+                >
+                  {videoModelOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="bg-neutral-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-            {/* Color Palette */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.5s' }}>
-              <label htmlFor="colorPalette" className="block text-sm font-medium text-white/70 mb-2.5 uppercase tracking-wider">
-                Color Palette
-              </label>
-              <select
-                id="colorPalette"
-                value={colorPalette}
-                onChange={(e) => setColorPalette(e.target.value)}
-                className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg width='12' height='7' viewBox='0 0 12 7' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L6 6L11 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: 'no-repeat',
-                  backgroundPosition: 'right 0.625rem center',
-                  backgroundSize: '12px 7px',
-                  paddingRight: '2rem',
-                }}
-              >
-                {colorPaletteOptions.map((option) => (
-                  <option key={option.value} value={option.value} className="bg-neutral-900">
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Pacing */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.55s' }}>
-              <label htmlFor="pacing" className="block text-sm font-medium text-white/70 mb-2.5 uppercase tracking-wider">
-                Pacing
-              </label>
-              <select
-                id="pacing"
-                value={pacing}
-                onChange={(e) => setPacing(e.target.value)}
-                className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg width='12' height='7' viewBox='0 0 12 7' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L6 6L11 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: 'no-repeat',
-                  backgroundPosition: 'right 0.625rem center',
-                  backgroundSize: '12px 7px',
-                  paddingRight: '2rem',
-                }}
-              >
-                {pacingOptions.map((option) => (
-                  <option key={option.value} value={option.value} className="bg-neutral-900">
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Cost Per Second */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.6s' }}>
-              <label htmlFor="costPerSecond" className="block text-sm font-medium text-white/70 mb-2.5 uppercase tracking-wider">
-                Cost Per Second
-              </label>
-              <select
-                id="costPerSecond"
-                value={costPerSecond}
-                onChange={(e) => setCostPerSecond(Number(e.target.value))}
-                className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-3 py-2.5 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg width='12' height='7' viewBox='0 0 12 7' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L6 6L11 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                  backgroundRepeat: 'no-repeat',
-                  backgroundPosition: 'right 0.625rem center',
-                  backgroundSize: '12px 7px',
-                  paddingRight: '2rem',
-                }}
-              >
-                {costPerSecondOptions.map((option) => (
-                  <option key={option.value} value={option.value} className="bg-neutral-900">
-                    {option.label} - {option.description}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-2 text-sm text-white/50">
-                Estimated cost: ${(costPerSecond * duration).toFixed(2)} for {duration}s video
-              </p>
+              {/* Image Models */}
+              <div className="flex-1">
+                <label htmlFor="imageModelId" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
+                  Image Models
+                </label>
+                <select
+                  id="imageModelId"
+                  value={imageModelId}
+                  onChange={(e) => setImageModelId(e.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
+                  style={{
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.5rem center',
+                    backgroundSize: '10px 6px',
+                    paddingRight: '1.5rem',
+                  }}
+                >
+                  {imageModelOptions.map((option) => (
+                    <option key={option.value} value={option.value} className="bg-neutral-900">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           </div>
 
@@ -1356,7 +1405,8 @@ function SimpleCreateContent() {
           aspectRatio,
           colorPalette,
           pacing,
-          costPerSecond,
+          videoModelId,
+        imageModelId,
         }}
         onGenerateScript={handleGenerateScript}
         onConfirmScript={handleConfirmScript}
