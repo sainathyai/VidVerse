@@ -156,6 +156,8 @@ async function fetchVideoGenerationModels(): Promise<VideoModel[]> {
       'deforum/deforum-stable-diffusion',
       // Standard tier - Sora 2 for standard
       'openai/sora-2',
+      // Premium tier - Sora 2 Pro
+      'openai/sora-2-pro',
       'wan-video/wan-2.5-i2v-720p',
       'wan-video/wan-2.5-i2v-1080p',
       'haiper-ai/haiper-video-2',
