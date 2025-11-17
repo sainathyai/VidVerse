@@ -67,54 +67,56 @@ const COST_TIERS = {
 };
 
 // Fallback models if API fetch fails - include models for all tiers
+// Fallback models - only include models that are in the dropdown
+// This matches the frontend dropdown options in SimpleCreatePage.tsx
 const FALLBACK_VIDEO_MODELS: VideoModel[] = [
   {
-    id: 'google/veo-3-fast',
-    name: 'Google Veo 3 Fast',
-    description: 'Fast video generation',
-    maxDuration: 5,
-    costPerSecond: 0.15,
-    tier: 'standard',
+    id: 'google/veo-3.1',
+    name: 'Google Veo 3.1',
+    description: 'Premium video generation',
+    maxDuration: 8,
+    costPerSecond: 0.20,
+    tier: 'premium',
   },
   {
     id: 'google/veo-3',
     name: 'Google Veo 3',
     description: 'High quality video generation',
-    maxDuration: 5,
+    maxDuration: 60,
     costPerSecond: 0.20,
     tier: 'premium',
   },
   {
-    id: 'google/veo-3.1',
-    name: 'Google Veo 3.1',
-    description: 'Premium video generation',
-    maxDuration: 5,
-    costPerSecond: 0.20,
+    id: 'google/veo-3-fast',
+    name: 'Google Veo 3 Fast',
+    description: 'Fast video generation',
+    maxDuration: 60,
+    costPerSecond: 0.15,
+    tier: 'standard',
+  },
+  {
+    id: 'openai/sora-2-pro',
+    name: 'Sora 2 Pro',
+    description: 'OpenAI\'s most advanced synced-audio video generation',
+    maxDuration: 4,
+    costPerSecond: 0.15,
     tier: 'premium',
   },
   {
-    id: 'luma/dream-machine',
-    name: 'Luma Dream Machine',
-    description: 'Fast and cost-effective video generation',
-    maxDuration: 5,
-    costPerSecond: 0.03,
-    tier: 'budget',
+    id: 'openai/sora-2',
+    name: 'Sora 2',
+    description: 'OpenAI\'s video generation model',
+    maxDuration: 12,
+    costPerSecond: 0.10,
+    tier: 'standard',
   },
   {
-    id: 'luma/ray',
-    name: 'Luma Ray',
-    description: 'Fast, high-quality text-to-video and image-to-video',
-    maxDuration: 5,
-    costPerSecond: 0.05,
-    tier: 'economy',
-  },
-  {
-    id: 'anotherjesse/zeroscope-v2-xl',
-    name: 'Zeroscope v2 XL',
+    id: 'kwaivgi/kling-v2.5-turbo-pro',
+    name: 'Kling 2.5 Turbo Pro',
     description: 'High quality video generation',
-    maxDuration: 5,
-    costPerSecond: 0.02,
-    tier: 'budget',
+    maxDuration: 60,
+    costPerSecond: 0.07,
+    tier: 'economy',
   },
 ];
 
@@ -143,36 +145,15 @@ async function fetchVideoGenerationModels(): Promise<VideoModel[]> {
     const videoKeywords = ['video', 'text-to-video', 'image-to-video', 'animation'];
     const foundModels: VideoModel[] = [];
 
-    // Known video generation model IDs to check (prioritized by cost and availability)
+    // Only fetch models that are in the dropdown list (user-selected models)
+    // This matches the frontend dropdown options in SimpleCreatePage.tsx
     const knownVideoModelIds = [
-      // Budget tier - ByteDance (cheapest)
-      'bytedance/seedance-1-pro-fast',
-      'bytedance/seedance-1-pro',
-      'luma/dream-machine',
-      'anotherjesse/zeroscope-v2-xl',
-      // Economy tier
-      'wan-video/wan-2.5-i2v',
-      'luma/ray',
-      'stability-ai/stable-video-diffusion',
-      'kwaivgi/kling-v2.5-turbo-pro',
-      'deforum/deforum-stable-diffusion',
-      // Standard tier - Sora 2 for standard
-      'openai/sora-2',
-      // Premium tier - Sora 2 Pro
       'openai/sora-2-pro',
-      'wan-video/wan-2.5-i2v-720p',
-      'wan-video/wan-2.5-i2v-1080p',
-      'haiper-ai/haiper-video-2',
+      'google/veo-3',
       'google/veo-3.1',
-      'tencent/hunyuan-video',
-      'genmoai/mochi-1',
-      'minimax/video-01-live',
-      'google/veo-3.1-audio',
-      // Advanced tier
-      'runway/gen3-alpha-turbo',
-      'pika/pika-1.5',
-      // Premium tier
-      'runway/gen3-alpha',
+      'google/veo-3-fast',
+      'openai/sora-2',
+      'kwaivgi/kling-v2.5-turbo-pro',
     ];
 
     // Check each known model to see if it exists and get its details
@@ -287,6 +268,11 @@ export interface VideoGenerationOptions {
   numFrames?: number;
   videoModelId?: string; // Selected video model ID (e.g., 'google/veo-3.1')
   aspectRatio?: string; // Aspect ratio string like "16:9", "9:16", "1:1", etc.
+  // Style and mood parameters
+  style?: string; // Visual style
+  mood?: string; // Emotional tone
+  colorPalette?: string; // Color palette
+  pacing?: string; // Pacing/style
   // Veo 3.1 specific parameters
   image?: string; // URL of reference image
   lastFrame?: string; // URL of last frame for continuation
@@ -348,7 +334,32 @@ export async function generateVideo(
     height = 576,
     fps = 24,
     aspectRatio,
+    style,
+    mood,
+    colorPalette,
+    pacing,
   } = options;
+  
+  // Enhance prompt with style, mood, colorPalette, and pacing if provided
+  let enhancedPrompt = prompt;
+  const enhancements: string[] = [];
+  
+  if (style) {
+    enhancements.push(`Style: ${style}`);
+  }
+  if (mood) {
+    enhancements.push(`Mood: ${mood}`);
+  }
+  if (colorPalette) {
+    enhancements.push(`Color palette: ${colorPalette}`);
+  }
+  if (pacing) {
+    enhancements.push(`Pacing: ${pacing}`);
+  }
+  
+  if (enhancements.length > 0) {
+    enhancedPrompt = `${prompt}\n\nVisual specifications: ${enhancements.join(', ')}`;
+  }
 
   // Calculate numFrames based on duration and fps (for reference, not used in API call)
   // const numFrames = Math.ceil(duration * fps);
@@ -358,29 +369,74 @@ export async function generateVideo(
   
   let videoGenerationModels: VideoModel[];
   
-  // Fetch all models to get details for the selected model
-  const allVideoModels = await fetchVideoGenerationModels();
-  const selectedModel = allVideoModels.find(m => m.id === selectedModelId);
+  // Only fetch/validate the specific model that was requested, not all models
+  // First check fallback list (no API call needed)
+  const fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === selectedModelId);
   
-  if (selectedModel) {
-    videoGenerationModels = [selectedModel];
-    console.log(`[REPLICATE] Using model: ${selectedModel.id} (${selectedModel.name})`);
-  } else {
-    // Check fallback list
-    const fallbackModel = FALLBACK_VIDEO_MODELS.find(m => m.id === selectedModelId);
-    
-    if (fallbackModel) {
-      videoGenerationModels = [fallbackModel];
-      console.log(`[REPLICATE] Using fallback model: ${fallbackModel.id} (${fallbackModel.name})`);
-    } else {
-      // Model not found - return error instead of using a different model
-      console.error(`[REPLICATE] Model ${selectedModelId} not found in available models or fallback list`);
+  if (fallbackModel) {
+    // Use fallback model directly without API call
+    videoGenerationModels = [fallbackModel];
+    console.log(`[REPLICATE] Using model: ${fallbackModel.id} (${fallbackModel.name}) from fallback list`);
+  } else if (replicate) {
+    // Only if not in fallback, try to fetch just this one model from API
+    try {
+      const [owner, name] = selectedModelId.split('/');
+      const model = await replicate.models.get(owner, name);
+      
+      // Get pricing information for this model
+      const pricing = MODEL_PRICING[selectedModelId] || { costPerSecond: 0.10, tier: 'standard' as const };
+      
+      // Try to get version (optional, don't fail if it doesn't expose versions)
+      let latestVersionId: string | undefined;
+      try {
+        const versions = await replicate.models.versions.list(owner, name);
+        if (versions.results && versions.results.length > 0) {
+          latestVersionId = versions.results[0].id;
+        }
+      } catch (versionError: any) {
+        // Many models don't expose versions - this is fine, just log it
+        console.debug(`[REPLICATE] Model ${selectedModelId} does not expose versions (this is normal)`);
+      }
+      
+      // Determine max duration based on model
+      let maxDuration = 60; // Default
+      if (selectedModelId.includes('sora-2-pro')) {
+        maxDuration = 4;
+      } else if (selectedModelId.includes('sora-2')) {
+        maxDuration = 12;
+      } else if (selectedModelId.includes('veo-3.1')) {
+        maxDuration = 8;
+      }
+      
+      const fetchedModel: VideoModel = {
+        id: selectedModelId,
+        version: latestVersionId,
+        name: model.name || selectedModelId,
+        description: model.description || 'Video generation model',
+        maxDuration,
+        costPerSecond: pricing.costPerSecond,
+        tier: pricing.tier,
+      };
+      
+      videoGenerationModels = [fetchedModel];
+      console.log(`[REPLICATE] Using model: ${fetchedModel.id} (${fetchedModel.name}) from API`);
+    } catch (apiError: any) {
+      // If API fetch fails, return error
+      console.error(`[REPLICATE] Model ${selectedModelId} not found or not accessible: ${apiError.message}`);
       return {
         output: '',
         status: 'failed',
         error: `MODEL_NOT_FOUND: Model ${selectedModelId} is not available. Please select a different model.`,
       };
     }
+  } else {
+    // No replicate client and not in fallback
+    console.error(`[REPLICATE] Model ${selectedModelId} not found in fallback list and Replicate client not initialized`);
+    return {
+      output: '',
+      status: 'failed',
+      error: `MODEL_NOT_FOUND: Model ${selectedModelId} is not available. Please select a different model.`,
+    };
   }
   
   let lastError: Error | null = null;
@@ -405,14 +461,29 @@ export async function generateVideo(
         });
 
         // Use replicate.run for simpler API - it handles the prediction lifecycle automatically
-        // Truncate prompt to reasonable length to avoid API issues
-        if (!prompt || typeof prompt !== 'string') {
-          throw new Error(`Invalid prompt: prompt must be a non-empty string, got ${typeof prompt}`);
+        // Truncate prompt to model-specific limits to avoid API issues
+        if (!enhancedPrompt || typeof enhancedPrompt !== 'string') {
+          throw new Error(`Invalid prompt: prompt must be a non-empty string, got ${typeof enhancedPrompt}`);
         }
-        const truncatedPrompt = prompt.substring(0, 500);
         
-        if (truncatedPrompt.length < prompt.length) {
-          console.log(`[REPLICATE] Prompt truncated from ${prompt.length} to ${truncatedPrompt.length} characters`);
+        // Model-specific prompt length limits (characters)
+        // Most modern video models support 3000+ characters for detailed prompts
+        const modelPromptLimits: Record<string, number> = {
+          'openai/sora-2': 3000,        // Sora 2 supports longer prompts
+          'openai/sora-2-pro': 3000,    // Sora 2 Pro supports longer prompts
+          'google/veo-3': 3000,         // Veo 3 supports longer prompts
+          'google/veo-3.1': 3000,       // Veo 3.1 supports longer prompts
+          'google/veo-3-fast': 3000,    // Veo 3 Fast supports longer prompts
+          'kwaivgi/kling-v2.5-turbo-pro': 3000, // Kling supports longer prompts
+        };
+        
+        const maxPromptLength = modelPromptLimits[model.id] || 3000; // Default to 3000 characters
+        const truncatedPrompt = enhancedPrompt.length > maxPromptLength 
+          ? enhancedPrompt.substring(0, maxPromptLength - 3) + '...'
+          : enhancedPrompt;
+        
+        if (truncatedPrompt.length < enhancedPrompt.length) {
+          console.log(`[REPLICATE] Prompt truncated from ${enhancedPrompt.length} to ${truncatedPrompt.length} characters (model: ${model.id}, limit: ${maxPromptLength})`);
         }
 
         const apiCallStartTime = Date.now();

@@ -507,52 +507,39 @@ export function ProjectConfirmationModal({
             >
               Cancel
             </button>
-            {/* Intelligent button display based on context */}
-            {hasScript ? (
-              // User already has a script, show "Generate Video" button
+            {/* Always show both options - user's choice */}
+            <div className="flex gap-3">
+              {error ? (
+                <button
+                  onClick={onGenerateScript}
+                  disabled={isGeneratingScript}
+                  className="px-6 py-3 rounded-lg bg-gradient-to-r from-orange-500 to-red-500 text-white font-semibold hover:from-orange-600 hover:to-red-600 transition-all shadow-lg shadow-orange-500/30 flex items-center gap-2 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <FileText className="w-5 h-5" />
+                  Retry Generate Script
+                </button>
+              ) : (
+                <button
+                  onClick={onGenerateScript}
+                  disabled={isGeneratingScript}
+                  className="px-6 py-3 rounded-lg bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white font-semibold hover:from-blue-600 hover:via-purple-600 hover:to-pink-600 transition-all shadow-lg shadow-blue-500/30 flex items-center gap-2 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <FileText className="w-5 h-5" />
+                  Generate Script
+                </button>
+              )}
+              
+              {/* Always show Generate Video button - can generate from prompt or script */}
               <button
                 onClick={onConfirmScript}
-                disabled={isProcessing}
-                className="px-6 py-3 rounded-lg bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white font-semibold hover:from-blue-600 hover:via-purple-600 hover:to-pink-600 transition-all shadow-lg shadow-blue-500/30 flex items-center gap-2 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isProcessing || (!hasScript && !hasPrompt)}
+                className="px-6 py-3 rounded-lg bg-gradient-to-r from-green-500 to-emerald-500 text-white font-semibold hover:from-green-600 hover:to-emerald-600 transition-all shadow-lg shadow-green-500/30 flex items-center gap-2 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
+                title={!hasScript && !hasPrompt ? "Enter a prompt to generate video" : hasScript ? "Generate video from script" : "Generate video directly from prompt"}
               >
                 <CheckCircle2 className="w-5 h-5" />
                 Generate Video
               </button>
-            ) : hasPrompt ? (
-              // User has a prompt, show "Generate Script" button
-              <>
-                {error && (
-                  <button
-                    onClick={onGenerateScript}
-                    disabled={isGeneratingScript}
-                    className="px-6 py-3 rounded-lg bg-gradient-to-r from-orange-500 to-red-500 text-white font-semibold hover:from-orange-600 hover:to-red-600 transition-all shadow-lg shadow-orange-500/30 flex items-center gap-2 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <FileText className="w-5 h-5" />
-                    Retry Generate Script
-                  </button>
-                )}
-                {!error && (
-                  <button
-                    onClick={onGenerateScript}
-                    disabled={isGeneratingScript}
-                    className="px-6 py-3 rounded-lg bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white font-semibold hover:from-blue-600 hover:via-purple-600 hover:to-pink-600 transition-all shadow-lg shadow-blue-500/30 flex items-center gap-2 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <FileText className="w-5 h-5" />
-                    Generate Script
-                  </button>
-                )}
-              </>
-            ) : (
-              // No prompt or script, show "Generate Script" as default
-              <button
-                onClick={onGenerateScript}
-                disabled={isGeneratingScript}
-                className="px-6 py-3 rounded-lg bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white font-semibold hover:from-blue-600 hover:via-purple-600 hover:to-pink-600 transition-all shadow-lg shadow-blue-500/30 flex items-center gap-2 hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <FileText className="w-5 h-5" />
-                Generate Script
-              </button>
-            )}
+            </div>
           </div>
         )}
 

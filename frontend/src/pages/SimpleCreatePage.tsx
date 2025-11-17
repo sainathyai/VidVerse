@@ -700,7 +700,8 @@ function SimpleCreateContent() {
       const token = await getAccessToken();
       
       // If no project exists yet, create one first
-      if (!currentProjectId) {
+      let projectIdToUse = currentProjectId;
+      if (!projectIdToUse) {
         let finalProjectName = projectName.trim();
         if (!finalProjectName) {
           finalProjectName = await generateProjectName(prompt.trim(), category, token);
@@ -725,6 +726,7 @@ function SimpleCreateContent() {
           }),
         }, token);
         
+        projectIdToUse = project.id;
         setCurrentProjectId(project.id);
       }
 
@@ -758,14 +760,22 @@ function SimpleCreateContent() {
         }
       }
       
-      // Update project with the final prompt
-      if (currentProjectId && finalPrompt) {
-        await apiRequest(`/api/projects/${currentProjectId}`, {
-          method: 'PATCH',
-          body: JSON.stringify({
-            prompt: finalPrompt,
-          }),
-        }, token);
+      // Update project with the final prompt and current model selection
+      if (projectIdToUse) {
+        const updateData: any = {};
+        if (finalPrompt) {
+          updateData.prompt = finalPrompt;
+        }
+        // Always update videoModelId to use current selection (user may have changed it)
+        if (videoModelId) {
+          updateData.videoModelId = videoModelId;
+        }
+        if (Object.keys(updateData).length > 0) {
+          await apiRequest(`/api/projects/${projectIdToUse}`, {
+            method: 'PATCH',
+            body: JSON.stringify(updateData),
+          }, token);
+        }
       }
       
       // Simulate progress updates
@@ -789,7 +799,7 @@ function SimpleCreateContent() {
           sceneUrls: string[];
           frameUrls: Array<{ first: string; last: string }>;
         }>(
-          `/api/projects/${currentProjectId}/generate-sync`,
+          `/api/projects/${projectIdToUse}/generate-sync`,
           {
             method: 'POST',
             body: JSON.stringify({}),

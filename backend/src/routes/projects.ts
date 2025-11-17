@@ -183,6 +183,343 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
       : (projectData.config || {});
 
     try {
+      const duration = config.duration || 60;
+      const videoDuration = duration; // Duration in seconds
+
+      // Detect if the prompt is already a script or just context
+      const isScriptFormat = (text: string, duration: number): boolean => {
+        if (!text || text.trim().length === 0) return false;
+        
+        // Factor 1: Length-based detection - if more than 300 words per second, likely a script
+        const wordCount = text.trim().split(/\s+/).length;
+        const wordsPerSecond = wordCount / duration;
+        if (wordsPerSecond >= 300) {
+          fastify.log.info({ projectId, wordCount, duration, wordsPerSecond }, 'Detected as script based on length (>=300 words/sec)');
+          return true;
+        }
+        
+        // Factor 2: Check for numbered scenes (e.g., "Scene 1", "Scene 2", "Scene:", etc.)
+        const sceneNumberPatterns = [
+          /scene\s+\d+/i,
+          /scene\s*:\s*\d+/i,
+          /scene\s*#\s*\d+/i,
+          /^\s*\d+\.\s*scene/i,
+          /scene\s*number\s*\d+/i,
+        ];
+        const hasNumberedScenes = sceneNumberPatterns.some(pattern => pattern.test(text));
+        if (hasNumberedScenes) {
+          fastify.log.info({ projectId }, 'Detected as script based on numbered scenes');
+          return true;
+        }
+        
+        // Factor 3: Check for duration mentions in scenes
+        const durationPatterns = [
+          /duration\s*:\s*\d+/i,
+          /duration\s*=\s*\d+/i,
+          /\d+\s*seconds?/i,
+          /startTime|endTime/i,
+        ];
+        const hasDurationInfo = durationPatterns.some(pattern => pattern.test(text));
+        if (hasDurationInfo && hasNumberedScenes) {
+          fastify.log.info({ projectId }, 'Detected as script based on duration info with scenes');
+          return true;
+        }
+        
+        // Factor 4: Check for JSON structure with script keywords
+        try {
+          const parsed = JSON.parse(text);
+          // Check if it has script-like structure
+          if (parsed.scenes && Array.isArray(parsed.scenes)) {
+            return true;
+          }
+          if (parsed.overallPrompt && parsed.parsedPrompt) {
+            return true;
+          }
+          if (parsed.sceneNumber !== undefined) {
+            return true;
+          }
+        } catch {
+          // Not valid JSON, check for script-like patterns
+        }
+        
+        // Factor 5: Check for script-related keywords (case-insensitive)
+        const scriptKeywords = [
+          '"sceneNumber"', '"scenes"', '"overallPrompt"', '"parsedPrompt"',
+          'sceneNumber', 'scenes', 'overallPrompt', 'parsedPrompt',
+          'scene 1', 'scene 2', 'scene:', 'scene number',
+          'startTime', 'endTime', 'duration', 'scene prompt'
+        ];
+        
+        const lowerText = text.toLowerCase();
+        const keywordMatches = scriptKeywords.filter(keyword => 
+          lowerText.includes(keyword.toLowerCase())
+        );
+        
+        // If we find multiple script keywords, it's likely a script
+        if (keywordMatches.length >= 2) {
+          return true;
+        }
+        
+        // Factor 6: Check for JSON-like structure with scenes
+        if (/"scenes"\s*:\s*\[/.test(text) || /"sceneNumber"/.test(text)) {
+          return true;
+        }
+        
+        return false;
+      };
+
+      // Check if the prompt is already a script
+      if (isScriptFormat(projectData.prompt, videoDuration)) {
+        fastify.log.info({ projectId }, 'Prompt is already a script format, parsing directly');
+        
+        let scriptJson: any;
+        try {
+          scriptJson = JSON.parse(projectData.prompt);
+        } catch (parseError) {
+          // Try to extract JSON from markdown code blocks
+          const jsonMatch = projectData.prompt.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+          if (jsonMatch && jsonMatch[1]) {
+            try {
+              scriptJson = JSON.parse(jsonMatch[1]);
+            } catch (e) {
+              // Still not JSON, try to parse as text-based script
+              scriptJson = null;
+            }
+          } else {
+            // Not JSON, try to parse as text-based script format
+            scriptJson = null;
+          }
+        }
+
+        // If we successfully parsed a JSON script, validate and return it
+        if (scriptJson && scriptJson.scenes && Array.isArray(scriptJson.scenes)) {
+          // Extract intelligent params from script for video generation
+          const extractedParams: any = {};
+          
+          // Extract style, mood, and other parsed prompt info
+          if (scriptJson.parsedPrompt) {
+            if (scriptJson.parsedPrompt.style) extractedParams.style = scriptJson.parsedPrompt.style;
+            if (scriptJson.parsedPrompt.mood) extractedParams.mood = scriptJson.parsedPrompt.mood;
+            if (scriptJson.parsedPrompt.keyElements) extractedParams.keyElements = scriptJson.parsedPrompt.keyElements;
+            if (scriptJson.parsedPrompt.keywords) extractedParams.keywords = scriptJson.parsedPrompt.keywords;
+          }
+          
+          // Merge in params from dropdown (config)
+          if (config.style) extractedParams.style = config.style;
+          if (config.mood) extractedParams.mood = config.mood;
+          if (config.aspectRatio) extractedParams.aspectRatio = config.aspectRatio;
+          if (config.colorPalette) extractedParams.colorPalette = config.colorPalette;
+          if (config.pacing) extractedParams.pacing = config.pacing;
+          
+          // Use scene references to determine proper splitting
+          // If scenes already have timing info, use that; otherwise calculate evenly
+          let scenes = scriptJson.scenes;
+          const hasTiming = scenes.some((s: any) => s.startTime !== undefined && s.endTime !== undefined);
+          
+          if (!hasTiming) {
+            // Calculate timing based on scene durations or split evenly
+            let totalAllocated = 0;
+            scenes = scenes.map((scene: any, index: number) => {
+              const sceneDuration = scene.duration || (videoDuration / scenes.length);
+              const startTime = totalAllocated;
+              const endTime = startTime + sceneDuration;
+              totalAllocated = endTime;
+              
+              return {
+                sceneNumber: scene.sceneNumber || index + 1,
+                prompt: scene.prompt || '',
+                duration: sceneDuration,
+                startTime: startTime,
+                endTime: endTime,
+              };
+            });
+          } else {
+            // Use existing timing, but ensure all fields are present
+            scenes = scenes.map((scene: any, index: number) => ({
+              sceneNumber: scene.sceneNumber || index + 1,
+              prompt: scene.prompt || '',
+              duration: scene.duration || ((scene.endTime || 0) - (scene.startTime || 0)),
+              startTime: scene.startTime || 0,
+              endTime: scene.endTime || 0,
+            }));
+          }
+
+          // Ensure overallPrompt is set
+          scriptJson.overallPrompt = scriptJson.overallPrompt || projectData.prompt;
+          
+          // Update parsedPrompt with merged params
+          if (!scriptJson.parsedPrompt) scriptJson.parsedPrompt = {};
+          scriptJson.parsedPrompt = { ...scriptJson.parsedPrompt, ...extractedParams };
+          
+          // Update config with extracted params if they exist
+          if (Object.keys(extractedParams).length > 0) {
+            const updatedConfig = { ...config, ...extractedParams };
+            // Optionally update the project config in database
+            // await query('UPDATE projects SET config = $1 WHERE id = $2', [JSON.stringify(updatedConfig), projectId]);
+          }
+
+          return reply.send({
+            script: JSON.stringify(scriptJson, null, 2),
+            scenes: scenes,
+          });
+        }
+        
+        // If not JSON, try to parse as text-based script format
+        if (!scriptJson) {
+          fastify.log.info({ projectId }, 'Attempting to parse text-based script format');
+          
+          // Parse text-based script with numbered scenes
+          const textScript = projectData.prompt;
+          const scenes: any[] = [];
+          
+          // Split by scene markers (Scene 1, Scene 2, etc.)
+          const scenePattern = /(?:^|\n)\s*(?:Scene\s*[#:]?\s*(\d+)|(\d+)\.\s*Scene|Scene\s*Number\s*(\d+))/i;
+          const sceneMatches = [...textScript.matchAll(new RegExp(scenePattern.source, 'gim'))];
+          
+          if (sceneMatches.length > 0) {
+            // Extract scenes
+            for (let i = 0; i < sceneMatches.length; i++) {
+              const match = sceneMatches[i];
+              const sceneNum = parseInt(match[1] || match[2] || match[3] || String(i + 1));
+              const startPos = match.index! + match[0].length;
+              const endPos = i < sceneMatches.length - 1 ? sceneMatches[i + 1].index! : textScript.length;
+              const sceneText = textScript.substring(startPos, endPos).trim();
+              
+              // Extract duration from scene text
+              const durationMatch = sceneText.match(/duration\s*[=:]\s*(\d+(?:\.\d+)?)\s*(?:seconds?|sec)?/i);
+              const secondsMatch = sceneText.match(/(\d+(?:\.\d+)?)\s*seconds?/i);
+              let sceneDuration: number | undefined;
+              
+              if (durationMatch) {
+                sceneDuration = parseFloat(durationMatch[1]);
+              } else if (secondsMatch) {
+                sceneDuration = parseFloat(secondsMatch[1]);
+              }
+              
+              // Extract startTime and endTime if present
+              const startTimeMatch = sceneText.match(/startTime\s*[=:]\s*(\d+(?:\.\d+)?)/i);
+              const endTimeMatch = sceneText.match(/endTime\s*[=:]\s*(\d+(?:\.\d+)?)/i);
+              const startTime = startTimeMatch ? parseFloat(startTimeMatch[1]) : undefined;
+              const endTime = endTimeMatch ? parseFloat(endTimeMatch[1]) : undefined;
+              
+              // Clean up the prompt text (remove metadata lines)
+              let promptText = sceneText
+                .replace(/duration\s*[=:]\s*\d+(?:\.\d+)?\s*(?:seconds?|sec)?/gi, '')
+                .replace(/(\d+(?:\.\d+)?)\s*seconds?/gi, '')
+                .replace(/startTime\s*[=:]\s*\d+(?:\.\d+)?/gi, '')
+                .replace(/endTime\s*[=:]\s*\d+(?:\.\d+)?/gi, '')
+                .trim();
+              
+              scenes.push({
+                sceneNumber: sceneNum,
+                prompt: promptText,
+                duration: sceneDuration,
+                startTime: startTime,
+                endTime: endTime,
+              });
+            }
+          } else {
+            // Fallback: try to split by common delimiters
+            const sections = textScript.split(/\n\s*\n+/);
+            sections.forEach((section, index) => {
+              if (section.trim().length > 50) { // Only include substantial sections
+                scenes.push({
+                  sceneNumber: index + 1,
+                  prompt: section.trim(),
+                  duration: undefined,
+                  startTime: undefined,
+                  endTime: undefined,
+                });
+              }
+            });
+          }
+          
+          if (scenes.length > 0) {
+            fastify.log.info({ projectId, sceneCount: scenes.length }, 'Successfully parsed text-based script');
+            
+            // Calculate timing if not provided
+            let totalAllocated = 0;
+            const scenesWithTiming = scenes.map((scene, index) => {
+              let sceneDuration = scene.duration;
+              let startTime = scene.startTime;
+              let endTime = scene.endTime;
+              
+              if (!sceneDuration) {
+                // Distribute remaining time evenly
+                const remainingScenes = scenes.length - index;
+                const remainingTime = videoDuration - totalAllocated;
+                sceneDuration = remainingTime / remainingScenes;
+              }
+              
+              if (startTime === undefined) {
+                startTime = totalAllocated;
+              }
+              
+              if (endTime === undefined) {
+                endTime = startTime + sceneDuration;
+              }
+              
+              totalAllocated = endTime;
+              
+              return {
+                sceneNumber: scene.sceneNumber || index + 1,
+                prompt: scene.prompt,
+                duration: sceneDuration,
+                startTime: startTime,
+                endTime: endTime,
+              };
+            });
+            
+            // Build the script JSON structure
+            const parsedPrompt: any = {
+              duration: videoDuration,
+            };
+            
+            // Merge in params from dropdown (config)
+            if (config.style) parsedPrompt.style = config.style;
+            if (config.mood) parsedPrompt.mood = config.mood;
+            if (config.aspectRatio) parsedPrompt.aspectRatio = config.aspectRatio;
+            if (config.colorPalette) parsedPrompt.colorPalette = config.colorPalette;
+            if (config.pacing) parsedPrompt.pacing = config.pacing;
+            
+            // Extract key elements and keywords from the script text
+            const keyElements: string[] = [];
+            const keywords: string[] = [];
+            
+            // Simple extraction: look for common patterns
+            const allText = scenesWithTiming.map(s => s.prompt).join(' ');
+            const elementPatterns = [
+              /(?:a|an|the)\s+([a-z]+(?:\s+[a-z]+){0,2})\s+(?:calendar|book|watch|phone|laptop|table|chair|desk|pen|paper|picture|photo|frame|wall|door|window)/gi,
+            ];
+            
+            // Extract potential key elements (this is a simple heuristic)
+            const commonObjects = ['calendar', 'book', 'watch', 'phone', 'laptop', 'table', 'chair', 'desk'];
+            commonObjects.forEach(obj => {
+              if (allText.toLowerCase().includes(obj)) {
+                keyElements.push(obj);
+              }
+            });
+            
+            parsedPrompt.keyElements = keyElements.length > 0 ? keyElements : undefined;
+            parsedPrompt.keywords = keywords.length > 0 ? keywords : undefined;
+            
+            const scriptJson = {
+              overallPrompt: projectData.prompt,
+              parsedPrompt: parsedPrompt,
+              scenes: scenesWithTiming,
+            };
+            
+            return reply.send({
+              script: JSON.stringify(scriptJson, null, 2),
+              scenes: scenesWithTiming,
+            });
+          }
+        }
+      }
+
+      // If not a script, generate one using LLM
+      fastify.log.info({ projectId }, 'Prompt is context, generating script using LLM');
+      
       // Check if OpenRouter API key is configured
       const { config: appConfig } = await import('../config');
       if (!appConfig.openrouter.apiKey) {
@@ -192,23 +529,35 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
         });
       }
 
-      const duration = config.duration || 60;
-      const videoDuration = duration; // Duration in seconds
-
       // Build comprehensive prompt for elaborate script generation
       const systemPrompt = `You are an expert video script writer specializing in creating highly detailed, elaborate video scripts for AI video generation. Your task is to create an extremely detailed script with approximately 10,000 words that breaks down a video concept into multiple scenes with rich, vivid descriptions.
 
 CRITICAL REQUIREMENTS:
 1. Generate approximately 10,000 words of detailed script content
-2. Break the video into multiple scenes (typically 5-10 scenes for a ${videoDuration}-second video)
-3. Each scene must have:
+2. **INTELLIGENT SCENE SPLITTING**: Analyze the concept and identify natural scene breaks based on:
+   - Narrative flow and story progression
+   - Visual transitions and changes in setting/location
+   - Temporal changes (time of day, time progression)
+   - Character or object introductions
+   - Action sequences or key moments
+   - Emotional beats or mood shifts
+   Break the video into multiple scenes (typically 5-10 scenes for a ${videoDuration}-second video) based on these natural divisions
+3. **EXTRACT KEY ELEMENTS**: Identify and extract key visual elements, objects, characters, props, and recurring themes from the concept (e.g., calendar, books, specific clothing, objects, characters, locations, colors, textures). These elements must be consistently referenced across ALL scenes to maintain visual continuity.
+4. Each scene must have:
    - Detailed visual descriptions (camera angles, movements, lighting, composition)
    - Specific visual elements, colors, textures, and details
-   - Precise timing (startTime and endTime in seconds)
-   - Scene duration that adds up to the total video duration
+   - **Consistent key elements** from the overall concept (characters, objects, props, colors, etc.)
+   - Precise timing (startTime and endTime in seconds) that adds up exactly to ${videoDuration} seconds
+   - Scene duration that matches the narrative importance and visual complexity
    - Elaborate prompt descriptions suitable for AI video generation
-4. Include overall creative direction, mood, style, and pacing
-5. Output MUST be valid JSON format matching the exact structure specified below
+5. **PARSE INTELLIGENT PARAMS**: Extract and include in parsedPrompt:
+   - Style (visual style, cinematic style, artistic direction)
+   - Mood (emotional tone, atmosphere)
+   - Key elements array (all important objects, characters, props for consistency)
+   - Keywords (important visual and narrative keywords)
+6. **MAINTAIN CONSISTENCY**: Each scene prompt must reference the key elements extracted from the concept to ensure visual consistency throughout the video
+7. **SCENE REFERENCES**: If the concept mentions specific scenes, scene numbers, or scene breaks, use those as reference points for splitting
+8. Output MUST be valid JSON format matching the exact structure specified below
 
 OUTPUT FORMAT (JSON):
 {
@@ -217,12 +566,13 @@ OUTPUT FORMAT (JSON):
     "style": "Detailed style description",
     "mood": "Detailed mood description",
     "duration": ${videoDuration},
-    "keywords": ["keyword1", "keyword2", ...]
+    "keywords": ["keyword1", "keyword2", ...],
+    "keyElements": ["element1", "element2", ...] // Extracted key visual elements, objects, characters, props
   },
   "scenes": [
     {
       "sceneNumber": 1,
-      "prompt": "Extremely detailed, elaborate scene description (500-2000 words) with specific visual details, camera movements, lighting, colors, textures, composition, and all visual elements needed for AI video generation",
+      "prompt": "Extremely detailed, elaborate scene description (500-2000 words) with specific visual details, camera movements, lighting, colors, textures, composition, and all visual elements needed for AI video generation. MUST include references to key elements from the concept for consistency.",
       "duration": X.X,
       "startTime": X.X,
       "endTime": X.X
@@ -235,9 +585,13 @@ IMPORTANT:
 - Each scene prompt should be extremely detailed and elaborate (500-2000 words each)
 - Total word count should be approximately 10,000 words
 - Scene durations must add up exactly to ${videoDuration} seconds
+- **Extract and list key visual elements** (objects, characters, props, colors, textures) from the concept
+- **Reference these key elements consistently** in each scene prompt to maintain visual continuity
 - Be creative, vivid, and specific in your descriptions
-- Focus on visual details that will help AI video generation models create stunning visuals`;
+- Focus on visual details that will help AI video generation models create stunning visuals
+- Ensure characters, objects, and visual elements remain consistent across all scenes`;
 
+      // Build comprehensive user prompt with all project context
       const userPrompt = `Create an elaborate, detailed video script for the following concept:
 
 PROJECT DETAILS:
@@ -249,8 +603,45 @@ ${config.mood ? `- Mood: ${config.mood}` : ''}
 ${config.aspectRatio ? `- Aspect Ratio: ${config.aspectRatio}` : ''}
 ${config.colorPalette ? `- Color Palette: ${config.colorPalette}` : ''}
 ${config.pacing ? `- Pacing: ${config.pacing}` : ''}
+${config.constraints ? `- Constraints: ${config.constraints}` : ''}
 
-Generate an elaborate script with approximately 10,000 words, breaking this into multiple detailed scenes. Each scene should have rich, vivid descriptions perfect for AI video generation. Include specific details about camera movements, lighting, colors, textures, composition, and all visual elements.`;
+CRITICAL INSTRUCTIONS:
+1. **Analyze Scene References**: If the concept mentions specific scenes, scene numbers, scene breaks, or natural divisions, use those as reference points for splitting. Pay attention to:
+   - Explicit scene mentions (e.g., "Scene 1:", "First scene", "Next scene")
+   - Natural narrative breaks or transitions
+   - Changes in location, time, or focus
+   - Visual or thematic shifts
+
+2. **Extract Key Elements**: Identify all key visual elements from the concept such as:
+   - Specific objects, props, or items (e.g., calendar, books, watch, specific clothing items)
+   - Characters and their consistent appearance/attributes
+   - Recurring visual themes, colors, or textures
+   - Locations or settings
+   - Any other elements that should remain consistent across scenes
+
+3. **Maintain Consistency**: Each scene must reference these key elements to ensure visual continuity. For example:
+   - If a character appears, maintain their consistent appearance, clothing, and attributes
+   - If specific objects (like a calendar or book) are mentioned, reference them consistently
+   - If specific colors or textures are key to the concept, include them in each scene
+
+4. **Intelligent Scene Splitting**: Break the concept into scenes based on:
+   - Natural narrative flow and story progression
+   - Visual transitions and setting changes
+   - Temporal progression (time of day, time passing)
+   - Character or object introductions
+   - Key moments or action sequences
+   - Emotional or mood shifts
+   If the concept already has scene divisions, respect and use those.
+
+5. **Parse Intelligent Params**: Extract and include in the parsedPrompt:
+   - Style: Visual/cinematic style from the concept or project settings
+   - Mood: Emotional tone and atmosphere
+   - Key elements: Array of all important objects, characters, props for consistency
+   - Keywords: Important visual and narrative keywords
+
+6. Generate an elaborate script with approximately 10,000 words, breaking this into multiple detailed scenes. Each scene should have rich, vivid descriptions perfect for AI video generation. Include specific details about camera movements, lighting, colors, textures, composition, and all visual elements.
+
+7. List all extracted key elements in the "keyElements" array in parsedPrompt so they can be referenced consistently across all scenes.`;
 
       // Call OpenRouter API with Claude Sonnet 4.5
       const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -307,29 +698,60 @@ Generate an elaborate script with approximately 10,000 words, breaking this into
       }
 
       const aiResponse = openrouterData.choices[0].message.content;
+      
+      if (!aiResponse || typeof aiResponse !== 'string') {
+        fastify.log.error({ projectId, response: openrouterData }, 'Invalid AI response format');
+        return reply.code(502).send({
+          error: 'Invalid response from AI service',
+          message: 'The AI service returned an invalid response format',
+        });
+      }
+
+      fastify.log.info({ projectId, responseLength: aiResponse.length }, 'Received AI response, parsing JSON');
 
       // Try to extract JSON from the response (it might be wrapped in markdown code blocks)
       let scriptJson: any;
       try {
         // Try to parse as-is first
         scriptJson = JSON.parse(aiResponse);
-      } catch (parseError) {
+        fastify.log.info({ projectId }, 'Successfully parsed JSON directly from AI response');
+      } catch (parseError: any) {
+        fastify.log.warn({ projectId, parseError: parseError.message }, 'Direct JSON parse failed, trying markdown extraction');
         // Try to extract JSON from markdown code blocks
         const jsonMatch = aiResponse.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
         if (jsonMatch && jsonMatch[1]) {
           try {
             scriptJson = JSON.parse(jsonMatch[1]);
-          } catch (e) {
+            fastify.log.info({ projectId }, 'Successfully parsed JSON from markdown code block');
+          } catch (e: any) {
+            fastify.log.warn({ projectId, error: e.message }, 'Markdown extraction failed, trying regex match');
             // If still fails, try to find JSON object in the text
             const jsonObjectMatch = aiResponse.match(/\{[\s\S]*\}/);
             if (jsonObjectMatch) {
-              scriptJson = JSON.parse(jsonObjectMatch[0]);
+              try {
+                scriptJson = JSON.parse(jsonObjectMatch[0]);
+                fastify.log.info({ projectId }, 'Successfully parsed JSON using regex match');
+              } catch (regexError: any) {
+                fastify.log.error({ projectId, error: regexError.message, responsePreview: aiResponse.substring(0, 500) }, 'Failed to parse JSON from AI response');
+                return reply.code(502).send({
+                  error: 'Failed to parse script JSON',
+                  message: `Could not extract valid JSON from AI response: ${regexError.message}`,
+                });
+              }
             } else {
-              throw new Error('Could not extract JSON from AI response');
+              fastify.log.error({ projectId, responsePreview: aiResponse.substring(0, 500) }, 'No JSON object found in AI response');
+              return reply.code(502).send({
+                error: 'Invalid script format',
+                message: 'Could not extract JSON from AI response. The response may not contain valid JSON.',
+              });
             }
           }
         } else {
-          throw parseError;
+          fastify.log.error({ projectId, parseError: parseError.message, responsePreview: aiResponse.substring(0, 500) }, 'Failed to parse JSON and no markdown code block found');
+          return reply.code(502).send({
+            error: 'Failed to parse script JSON',
+            message: `Could not parse JSON from AI response: ${parseError.message}`,
+          });
         }
       }
 
@@ -352,12 +774,20 @@ Generate an elaborate script with approximately 10,000 words, breaking this into
 
       // Ensure overallPrompt is set
       scriptJson.overallPrompt = scriptJson.overallPrompt || projectData.prompt;
+      
+      // Merge in params from config (dropdown selections) into parsedPrompt
+      if (!scriptJson.parsedPrompt) scriptJson.parsedPrompt = {};
+      if (config.style) scriptJson.parsedPrompt.style = config.style;
+      if (config.mood) scriptJson.parsedPrompt.mood = config.mood;
+      if (config.aspectRatio) scriptJson.parsedPrompt.aspectRatio = config.aspectRatio;
+      if (config.colorPalette) scriptJson.parsedPrompt.colorPalette = config.colorPalette;
+      if (config.pacing) scriptJson.parsedPrompt.pacing = config.pacing;
 
       // Return the script
-      return {
+      return reply.send({
         script: JSON.stringify(scriptJson, null, 2),
         scenes: scenes,
-      };
+      });
     } catch (error: any) {
       fastify.log.error({ err: error, projectId }, 'Script generation failed');
       return reply.code(500).send({
@@ -410,7 +840,15 @@ Generate an elaborate script with approximately 10,000 words, breaking this into
     const os = await import('os');
 
     const generationStartTime = Date.now();
-    fastify.log.info({ projectId, userId: user.sub }, 'Starting synchronous video generation');
+    fastify.log.info({ 
+      projectId, 
+      userId: user.sub,
+      configVideoModelId: config.videoModelId,
+      configAspectRatio: config.aspectRatio,
+      configStyle: config.style,
+      configMood: config.mood,
+      rawConfigType: typeof projectData.config,
+    }, 'Starting synchronous video generation');
 
     try {
       // Update project status to generating
@@ -421,35 +859,245 @@ Generate an elaborate script with approximately 10,000 words, breaking this into
       );
       fastify.log.info({ projectId }, 'Step 0: Project status updated successfully');
 
-      // 1. Parse prompt
-      fastify.log.info({ projectId, promptLength: projectData.prompt?.length || 0 }, 'Step 1: Parsing prompt');
-      const parsedPrompt = parsePrompt(projectData.prompt, config.duration || 60);
-      if (config.style) parsedPrompt.style = config.style;
-      if (config.mood) parsedPrompt.mood = config.mood;
-      fastify.log.info({ 
-        projectId, 
-        parsedStyle: parsedPrompt.style,
-        parsedMood: parsedPrompt.mood,
-        keywordsCount: parsedPrompt.keywords?.length || 0,
-      }, 'Step 1: Prompt parsed successfully');
+      // 1. Check if prompt is already a script, or parse/plan scenes
+      const videoDuration = config.duration || 60;
+      let scenes: Array<{ sceneNumber: number; prompt: string; duration: number; startTime: number; endTime: number }>;
+      let scriptParsedPrompt: any = {};
+      
+      // Detect if the prompt is already a script
+      const isScriptFormat = (text: string, duration: number): boolean => {
+        if (!text || text.trim().length === 0) return false;
+        
+        // Factor 1: Length-based detection
+        const wordCount = text.trim().split(/\s+/).length;
+        const wordsPerSecond = wordCount / duration;
+        if (wordsPerSecond >= 300) {
+          return true;
+        }
+        
+        // Factor 2: Check for numbered scenes
+        const sceneNumberPatterns = [
+          /scene\s+\d+/i,
+          /scene\s*:\s*\d+/i,
+          /scene\s*#\s*\d+/i,
+          /^\s*\d+\.\s*scene/i,
+          /scene\s*number\s*\d+/i,
+        ];
+        const hasNumberedScenes = sceneNumberPatterns.some(pattern => pattern.test(text));
+        if (hasNumberedScenes) {
+          return true;
+        }
+        
+        // Factor 3: Check for duration mentions in scenes
+        const durationPatterns = [
+          /duration\s*:\s*\d+/i,
+          /duration\s*=\s*\d+/i,
+          /\d+\s*seconds?/i,
+          /startTime|endTime/i,
+        ];
+        const hasDurationInfo = durationPatterns.some(pattern => pattern.test(text));
+        if (hasDurationInfo && hasNumberedScenes) {
+          return true;
+        }
+        
+        // Factor 4: Check for JSON structure
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.scenes && Array.isArray(parsed.scenes)) {
+            return true;
+          }
+          if (parsed.overallPrompt && parsed.parsedPrompt) {
+            return true;
+          }
+        } catch {
+          // Not valid JSON
+        }
+        
+        return false;
+      };
+      
+      if (isScriptFormat(projectData.prompt, videoDuration)) {
+        fastify.log.info({ projectId }, 'Step 1-2: Prompt is a script, parsing directly');
+        
+        // Parse script (same logic as generate-script endpoint)
+        let scriptJson: any;
+        try {
+          scriptJson = JSON.parse(projectData.prompt);
+        } catch {
+          const jsonMatch = projectData.prompt.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+          if (jsonMatch && jsonMatch[1]) {
+            try {
+              scriptJson = JSON.parse(jsonMatch[1]);
+            } catch {
+              scriptJson = null;
+            }
+          } else {
+            scriptJson = null;
+          }
+        }
+        
+        if (scriptJson && scriptJson.scenes && Array.isArray(scriptJson.scenes)) {
+          // Use scenes from script
+          scriptParsedPrompt = scriptJson.parsedPrompt || {};
+          
+          // Merge in params from config (dropdown selections)
+          if (config.style) scriptParsedPrompt.style = config.style;
+          if (config.mood) scriptParsedPrompt.mood = config.mood;
+          if (config.aspectRatio) scriptParsedPrompt.aspectRatio = config.aspectRatio;
+          if (config.colorPalette) scriptParsedPrompt.colorPalette = config.colorPalette;
+          if (config.pacing) scriptParsedPrompt.pacing = config.pacing;
+          
+          // Use scenes from script
+          scenes = scriptJson.scenes.map((scene: any, index: number) => ({
+            sceneNumber: scene.sceneNumber || index + 1,
+            prompt: scene.prompt || '',
+            duration: scene.duration || ((scene.endTime || 0) - (scene.startTime || 0)),
+            startTime: scene.startTime || 0,
+            endTime: scene.endTime || 0,
+          }));
+        } else {
+          // Try to parse as text-based script
+          const textScript = projectData.prompt;
+          const parsedScenes: any[] = [];
+          
+          const scenePattern = /(?:^|\n)\s*(?:Scene\s*[#:]?\s*(\d+)|(\d+)\.\s*Scene|Scene\s*Number\s*(\d+))/i;
+          const sceneMatches = [...textScript.matchAll(new RegExp(scenePattern.source, 'gim'))];
+          
+          if (sceneMatches.length > 0) {
+            for (let i = 0; i < sceneMatches.length; i++) {
+              const match = sceneMatches[i];
+              const sceneNum = parseInt(match[1] || match[2] || match[3] || String(i + 1));
+              const startPos = match.index! + match[0].length;
+              const endPos = i < sceneMatches.length - 1 ? sceneMatches[i + 1].index! : textScript.length;
+              const sceneText = textScript.substring(startPos, endPos).trim();
+              
+              const durationMatch = sceneText.match(/duration\s*[=:]\s*(\d+(?:\.\d+)?)\s*(?:seconds?|sec)?/i);
+              const secondsMatch = sceneText.match(/(\d+(?:\.\d+)?)\s*seconds?/i);
+              let sceneDuration: number | undefined;
+              
+              if (durationMatch) {
+                sceneDuration = parseFloat(durationMatch[1]);
+              } else if (secondsMatch) {
+                sceneDuration = parseFloat(secondsMatch[1]);
+              }
+              
+              const startTimeMatch = sceneText.match(/startTime\s*[=:]\s*(\d+(?:\.\d+)?)/i);
+              const endTimeMatch = sceneText.match(/endTime\s*[=:]\s*(\d+(?:\.\d+)?)/i);
+              const startTime = startTimeMatch ? parseFloat(startTimeMatch[1]) : undefined;
+              const endTime = endTimeMatch ? parseFloat(endTimeMatch[1]) : undefined;
+              
+              let promptText = sceneText
+                .replace(/duration\s*[=:]\s*\d+(?:\.\d+)?\s*(?:seconds?|sec)?/gi, '')
+                .replace(/(\d+(?:\.\d+)?)\s*seconds?/gi, '')
+                .replace(/startTime\s*[=:]\s*\d+(?:\.\d+)?/gi, '')
+                .replace(/endTime\s*[=:]\s*\d+(?:\.\d+)?/gi, '')
+                .trim();
+              
+              parsedScenes.push({
+                sceneNumber: sceneNum,
+                prompt: promptText,
+                duration: sceneDuration,
+                startTime: startTime,
+                endTime: endTime,
+              });
+            }
+          }
+          
+          if (parsedScenes.length > 0) {
+            // Calculate timing if not provided
+            let totalAllocated = 0;
+            scenes = parsedScenes.map((scene, index) => {
+              let sceneDuration = scene.duration;
+              let startTime = scene.startTime;
+              let endTime = scene.endTime;
+              
+              if (!sceneDuration) {
+                const remainingScenes = parsedScenes.length - index;
+                const remainingTime = videoDuration - totalAllocated;
+                sceneDuration = remainingTime / remainingScenes;
+              }
+              
+              if (startTime === undefined) {
+                startTime = totalAllocated;
+              }
+              
+              if (endTime === undefined) {
+                endTime = startTime + sceneDuration;
+              }
+              
+              totalAllocated = endTime;
+              
+              return {
+                sceneNumber: scene.sceneNumber || index + 1,
+                prompt: scene.prompt,
+                duration: sceneDuration,
+                startTime: startTime,
+                endTime: endTime,
+              };
+            });
+            
+            // Extract params from config
+            scriptParsedPrompt = {
+              duration: videoDuration,
+            };
+            if (config.style) scriptParsedPrompt.style = config.style;
+            if (config.mood) scriptParsedPrompt.mood = config.mood;
+            if (config.aspectRatio) scriptParsedPrompt.aspectRatio = config.aspectRatio;
+            if (config.colorPalette) scriptParsedPrompt.colorPalette = config.colorPalette;
+            if (config.pacing) scriptParsedPrompt.pacing = config.pacing;
+          } else {
+            // Fallback to normal parsing
+            fastify.log.info({ projectId }, 'Step 1: Parsing prompt (script parsing failed, using normal parser)');
+            const parsedPrompt = parsePrompt(projectData.prompt, videoDuration);
+            if (config.style) parsedPrompt.style = config.style;
+            if (config.mood) parsedPrompt.mood = config.mood;
+            scriptParsedPrompt = parsedPrompt;
+            
+            fastify.log.info({ projectId, duration: videoDuration }, 'Step 2: Planning scenes');
+            scenes = planScenes(projectData.prompt, parsedPrompt, videoDuration);
+          }
+        }
+        
+        fastify.log.info({ 
+          projectId, 
+          sceneCount: scenes.length,
+          parsedStyle: scriptParsedPrompt.style,
+          parsedMood: scriptParsedPrompt.mood,
+          parsedAspectRatio: scriptParsedPrompt.aspectRatio,
+        }, 'Step 1-2: Script parsed successfully');
+      } else {
+        // Normal flow: parse prompt and plan scenes
+        fastify.log.info({ projectId, promptLength: projectData.prompt?.length || 0 }, 'Step 1: Parsing prompt');
+        const parsedPrompt = parsePrompt(projectData.prompt, videoDuration);
+        if (config.style) parsedPrompt.style = config.style;
+        if (config.mood) parsedPrompt.mood = config.mood;
+        scriptParsedPrompt = parsedPrompt;
+        
+        fastify.log.info({ 
+          projectId, 
+          parsedStyle: parsedPrompt.style,
+          parsedMood: parsedPrompt.mood,
+          keywordsCount: parsedPrompt.keywords?.length || 0,
+        }, 'Step 1: Prompt parsed successfully');
 
-      // 2. Plan scenes
-      fastify.log.info({ projectId, duration: config.duration || 60 }, 'Step 2: Planning scenes');
-      const scenes = planScenes(projectData.prompt, parsedPrompt, config.duration || 60);
-      fastify.log.info({ 
-        projectId, 
-        sceneCount: scenes.length,
-        scenes: scenes.map(s => ({ 
-          number: s.sceneNumber, 
-          duration: s.duration, 
-          promptLength: s.prompt?.length || 0 
-        })),
-      }, 'Step 2: Scenes planned successfully');
+        fastify.log.info({ projectId, duration: videoDuration }, 'Step 2: Planning scenes');
+        scenes = planScenes(projectData.prompt, parsedPrompt, videoDuration);
+        fastify.log.info({ 
+          projectId, 
+          sceneCount: scenes.length,
+          scenes: scenes.map(s => ({ 
+            number: s.sceneNumber, 
+            duration: s.duration, 
+            promptLength: s.prompt?.length || 0 
+          })),
+        }, 'Step 2: Scenes planned successfully');
+      }
 
       // 3. Generate videos for each scene
       fastify.log.info({ projectId, totalScenes: scenes.length }, 'Step 3: Starting video generation for all scenes');
       const sceneVideos: string[] = [];
       const frameUrls: { first: string; last: string }[] = [];
+      let previousSceneLastFrameUrl: string | undefined = undefined; // Track last frame from previous scene
 
       for (let i = 0; i < scenes.length; i++) {
         const scene = scenes[i];
@@ -461,16 +1109,56 @@ Generate an elaborate script with approximately 10,000 words, breaking this into
           scenePrompt: scene.prompt,
           scenePromptPreview: scene.prompt?.substring(0, 150) + '...',
           sceneDuration: scene.duration,
+          hasReferenceFrame: !!previousSceneLastFrameUrl,
         }, `Step 3.${i + 1}: Generating video for scene ${scene.sceneNumber}/${scenes.length} with unique prompt`);
 
         try {
-          // Generate video for scene with user's selected video model and aspect ratio
-          const result = await generateVideo({
+          // Get the selected video model ID - use from config, fallback to default
+          const selectedVideoModelId = config.videoModelId || 'google/veo-3.1';
+          
+          fastify.log.info({ 
+            projectId,
+            sceneNumber: scene.sceneNumber,
+            configVideoModelId: config.videoModelId,
+            selectedVideoModelId: selectedVideoModelId,
+            usingDefault: !config.videoModelId,
+          }, `Step 3.${i + 1}: Video model selection`);
+          
+          // Build video generation options
+          const videoGenOptions: any = {
             prompt: scene.prompt,
             duration: scene.duration,
-            videoModelId: config.videoModelId || 'google/veo-3.1', // Pass user's selected video model
-            aspectRatio: config.aspectRatio || '16:9', // Pass aspect ratio (default to 16:9 landscape)
-          });
+            videoModelId: selectedVideoModelId, // Pass user's selected video model
+            aspectRatio: scriptParsedPrompt.aspectRatio || config.aspectRatio || '16:9', // Use from script or config
+            style: scriptParsedPrompt.style || config.style, // Use from script or config
+            mood: scriptParsedPrompt.mood || config.mood, // Use from script or config
+            colorPalette: scriptParsedPrompt.colorPalette || config.colorPalette, // Use from script or config
+            pacing: scriptParsedPrompt.pacing || config.pacing, // Use from script or config
+          };
+          
+          // Use last frame from previous scene as reference for smooth transitions
+          // For Veo 3.1, use lastFrame parameter; for other models, use image parameter
+          if (previousSceneLastFrameUrl && i > 0) {
+            if (selectedVideoModelId === 'google/veo-3.1') {
+              videoGenOptions.lastFrame = previousSceneLastFrameUrl;
+              fastify.log.info({ 
+                projectId, 
+                sceneNumber: scene.sceneNumber,
+                lastFrameUrl: previousSceneLastFrameUrl,
+              }, `Step 3.${i + 1}: Using last frame from scene ${i} as reference for Veo 3.1`);
+            } else {
+              // For other models (Veo 3, Veo 3 Fast, Sora 2, Kling), use image parameter
+              videoGenOptions.image = previousSceneLastFrameUrl;
+              fastify.log.info({ 
+                projectId, 
+                sceneNumber: scene.sceneNumber,
+                referenceImageUrl: previousSceneLastFrameUrl,
+              }, `Step 3.${i + 1}: Using last frame from scene ${i} as reference image`);
+            }
+          }
+          
+          // Generate video for scene with all params from script and dropdown
+          const result = await generateVideo(videoGenOptions);
 
           const sceneGenDuration = Date.now() - sceneStartTime;
           fastify.log.info({ 
@@ -662,6 +1350,15 @@ Generate an elaborate script with approximately 10,000 words, breaking this into
             lastFrameUrl: frames.lastFrameUrl,
           }, `Step 3.${i + 1}.1: Frames extracted successfully`);
           frameUrls.push({ first: frames.firstFrameUrl, last: frames.lastFrameUrl });
+          
+          // Store last frame URL for next scene (use full S3 URL)
+          previousSceneLastFrameUrl = frames.lastFrameUrl;
+          fastify.log.info({ 
+            projectId,
+            sceneNumber: scene.sceneNumber,
+            lastFrameUrl: previousSceneLastFrameUrl,
+            willUseForNextScene: i < scenes.length - 1,
+          }, `Step 3.${i + 1}.1: Stored last frame URL for next scene reference`);
 
           // Store scene in database
           fastify.log.info({ projectId, sceneNumber: scene.sceneNumber }, `Step 3.${i + 1}.2: Storing scene ${scene.sceneNumber} in database`);
@@ -1681,13 +2378,18 @@ Generate an elaborate script with approximately 10,000 words, breaking this into
       const newConfig = (request.body as any).config;
       updates.push(`config = $${paramIndex++}`);
       values.push(JSON.stringify(newConfig));
-    } else if (data.style || data.mood || data.constraints || data.audioUrl) {
+    } else if (data.style || data.mood || data.constraints || data.audioUrl || data.videoModelId || data.aspectRatio || data.colorPalette || data.pacing || data.imageModelId) {
       // Partial config update (merge with existing)
       const config = typeof project.config === 'string' ? JSON.parse(project.config) : (project.config || {});
       if (data.style) config.style = data.style;
       if (data.mood) config.mood = data.mood;
       if (data.constraints) config.constraints = data.constraints;
       if (data.audioUrl) config.audioUrl = data.audioUrl;
+      if (data.videoModelId) config.videoModelId = data.videoModelId;
+      if (data.aspectRatio) config.aspectRatio = data.aspectRatio;
+      if (data.colorPalette) config.colorPalette = data.colorPalette;
+      if (data.pacing) config.pacing = data.pacing;
+      if (data.imageModelId) config.imageModelId = data.imageModelId;
       updates.push(`config = $${paramIndex++}`);
       values.push(JSON.stringify(config));
     }

@@ -61,6 +61,11 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
       throw new Error('Project not found');
     }
 
+    // Parse config (may be string or object)
+    const config = typeof projectData.config === 'string' 
+      ? JSON.parse(projectData.config) 
+      : (projectData.config || {});
+
     try {
       // Update job progress
       await job.updateProgress(5);
@@ -78,6 +83,7 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
       // 3. Generate videos for each scene
       const sceneVideos: string[] = [];
       const frameUrls: { first: string; last: string }[] = [];
+      let previousSceneLastFrameUrl: string | undefined = undefined; // Track last frame from previous scene
 
       for (let i = 0; i < scenes.length; i++) {
         const scene = scenes[i];
@@ -85,11 +91,34 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
 
         await job.updateProgress(sceneProgress);
 
-        // Generate video for scene
-        const result = await generateVideo({
+        // Build video generation options
+        const videoGenOptions: any = {
           prompt: scene.prompt,
           duration: scene.duration,
-        });
+          videoModelId: config.videoModelId || 'google/veo-3.1', // Pass user's selected video model
+          aspectRatio: config.aspectRatio || '16:9', // Pass aspect ratio
+          style: config.style || style,
+          mood: config.mood || mood,
+          colorPalette: config.colorPalette,
+          pacing: config.pacing,
+        };
+        
+        // Use last frame from previous scene as reference for smooth transitions
+        // For Veo 3.1, use lastFrame parameter; for other models, use image parameter
+        if (previousSceneLastFrameUrl && i > 0) {
+          const selectedModelId = config.videoModelId || 'google/veo-3.1';
+          if (selectedModelId === 'google/veo-3.1') {
+            videoGenOptions.lastFrame = previousSceneLastFrameUrl;
+            console.log(`[WORKER] Using last frame from scene ${i} as reference for Veo 3.1: ${previousSceneLastFrameUrl}`);
+          } else {
+            // For other models (Veo 3, Veo 3 Fast, Sora 2, Kling), use image parameter
+            videoGenOptions.image = previousSceneLastFrameUrl;
+            console.log(`[WORKER] Using last frame from scene ${i} as reference image: ${previousSceneLastFrameUrl}`);
+          }
+        }
+
+        // Generate video for scene with user's selected video model and aspect ratio
+        const result = await generateVideo(videoGenOptions);
 
         if (result.status === 'failed') {
           throw new Error(`Scene ${scene.sceneNumber} generation failed: ${result.error}`);
@@ -132,6 +161,10 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
         // Extract frames
         const frames = await extractFrames(videoUrl, userId, projectId, scene.sceneNumber);
         frameUrls.push({ first: frames.firstFrameUrl, last: frames.lastFrameUrl });
+        
+        // Store last frame URL for next scene (use full S3 URL)
+        previousSceneLastFrameUrl = frames.lastFrameUrl;
+        console.log(`[WORKER] Stored last frame URL for scene ${scene.sceneNumber}: ${previousSceneLastFrameUrl} (will use for next scene: ${i < scenes.length - 1})`);
 
         // Store scene in database
         await query(
