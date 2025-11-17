@@ -188,7 +188,23 @@ async function fetchVideoGenerationModels(): Promise<VideoModel[]> {
           description.includes(keyword) || modelName.includes(keyword)
         );
 
-        if (isVideoModel || modelId.includes('video') || modelId.includes('dream-machine') || modelId.includes('zeroscope') || modelId.includes('ray')) {
+        // Known video model patterns - explicitly include these even if keywords don't match
+        const isKnownVideoModel = modelId.includes('video') || 
+          modelId.includes('dream-machine') || 
+          modelId.includes('zeroscope') || 
+          modelId.includes('ray') ||
+          modelId.includes('veo') ||
+          modelId.includes('sora') ||
+          modelId.includes('kling') ||
+          modelId.includes('seedance') ||
+          modelId.includes('haiper') ||
+          modelId.includes('hunyuan') ||
+          modelId.includes('mochi') ||
+          modelId.includes('gen3') ||
+          modelId.includes('pika') ||
+          modelId.includes('wan-');
+
+        if (isVideoModel || isKnownVideoModel) {
           // Try to get the latest version ID
           let latestVersionId: string | undefined;
           try {
