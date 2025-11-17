@@ -509,16 +509,21 @@ export async function generateVideo(
             modelInput.aspect_ratio = soraAspectRatio;
             console.log(`[REPLICATE] Adding aspect_ratio parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${soraAspectRatio}`);
             
-            // Sora-2 and Sora-2 Pro require "seconds" parameter
-            // Sora-2: 4, 8, or 12
+            // Sora-2 and Sora-2 Pro support "seconds" parameter (optional, has defaults)
+            // Sora-2: 4, 8, or 12 (defaults to 4 if not specified)
             // Sora-2 Pro: 4 (default, may support more)
-            const validSeconds = isSora2Pro ? [4] : [4, 8, 12];
-            const requestedSeconds = Math.min(duration, isSora2Pro ? 4 : 12);
-            const soraSeconds = validSeconds.reduce((prev, curr) => 
-              Math.abs(curr - requestedSeconds) < Math.abs(prev - requestedSeconds) ? curr : prev
-            );
-            modelInput.seconds = soraSeconds;
-            console.log(`[REPLICATE] Setting seconds parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${soraSeconds} (requested: ${duration})`);
+            // Only include seconds if duration is explicitly provided and valid
+            if (duration && duration > 0) {
+              const validSeconds = isSora2Pro ? [4] : [4, 8, 12];
+              const requestedSeconds = Math.min(duration, isSora2Pro ? 4 : 12);
+              const soraSeconds = validSeconds.reduce((prev, curr) => 
+                Math.abs(curr - requestedSeconds) < Math.abs(prev - requestedSeconds) ? curr : prev
+              );
+              modelInput.seconds = soraSeconds;
+              console.log(`[REPLICATE] Setting seconds parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${soraSeconds} (requested: ${duration})`);
+            } else {
+              console.log(`[REPLICATE] No duration specified for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}, using model default`);
+            }
             
             // Sora-2 and Sora-2 Pro support input_reference (image URL for first frame)
             if (options.image) {
