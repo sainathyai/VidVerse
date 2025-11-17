@@ -35,6 +35,7 @@ const MODEL_PRICING: Record<string, { costPerSecond: number; tier: VideoModel['t
     'google/veo-3.1': { costPerSecond: 0.20, tier: 'premium' },
     'google/veo-3-fast': { costPerSecond: 0.15, tier: 'standard' },
     'openai/sora-2': { costPerSecond: 0.10, tier: 'standard' },
+    'openai/sora-2-pro': { costPerSecond: 0.15, tier: 'premium' },
   };
 
 // Model ID to display name mapping for video models
@@ -43,6 +44,7 @@ export const VIDEO_MODEL_NAMES: Record<string, string> = {
   'google/veo-3.1': 'Veo 3.1',
   'google/veo-3-fast': 'Veo 3 Fast',
   'openai/sora-2': 'Sora 2',
+  'openai/sora-2-pro': 'Sora 2 Pro',
 };
 
 // Model ID to display name mapping for image models
@@ -412,6 +414,7 @@ export async function generateVideo(
           
           // Handle model-specific parameters
           const isSora2 = model.id === 'openai/sora-2';
+          const isSora2Pro = model.id === 'openai/sora-2-pro';
           const isVeo3Fast = model.id === 'google/veo-3-fast';
           const isVeo3 = model.id === 'google/veo-3' || model.id === 'google/veo-3.1';
           
@@ -454,8 +457,8 @@ export async function generateVideo(
             }
             
             console.log(`[REPLICATE] Adding Veo 3 Fast parameters: aspect_ratio=${veoFastAspectRatio}, duration=${modelInput.duration}, resolution=${modelInput.resolution}, generate_audio=${modelInput.generate_audio}, enhance_prompt=${modelInput.enhance_prompt}`);
-          } else if (isSora2) {
-            // Sora-2 format: aspect_ratio as "portrait" or "landscape", seconds as 4/8/12
+          } else if (isSora2 || isSora2Pro) {
+            // Sora-2 and Sora-2 Pro format: aspect_ratio as "portrait" or "landscape", seconds, resolution (Pro only)
             let soraAspectRatio: string;
             if (aspectRatio) {
               // Normalize aspect ratio format first
@@ -463,31 +466,45 @@ export async function generateVideo(
                 ? aspectRatio 
                 : convertAspectRatioToRatio(aspectRatio);
               
-              // Convert to Sora-2 format: "portrait" or "landscape"
+              // Convert to Sora format: "portrait" or "landscape"
               if (normalizedAspectRatio) {
                 // Check if it's portrait (height > width) or landscape (width >= height)
                 const [width, height] = normalizedAspectRatio.split(':').map(Number);
                 soraAspectRatio = height > width ? 'portrait' : 'landscape';
               } else {
-                // Default to landscape if conversion fails
-                soraAspectRatio = 'landscape';
+                // Default to portrait for Sora-2 Pro, landscape for Sora-2
+                soraAspectRatio = isSora2Pro ? 'portrait' : 'landscape';
               }
             } else {
-              // Default to landscape if not specified
-              soraAspectRatio = 'landscape';
+              // Default to portrait for Sora-2 Pro, landscape for Sora-2
+              soraAspectRatio = isSora2Pro ? 'portrait' : 'landscape';
             }
             
             modelInput.aspect_ratio = soraAspectRatio;
-            console.log(`[REPLICATE] Adding aspect_ratio parameter for Sora-2: ${soraAspectRatio}`);
+            console.log(`[REPLICATE] Adding aspect_ratio parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${soraAspectRatio}`);
             
-            // Sora-2 requires "seconds" parameter (4, 8, or 12)
-            const validSeconds = [4, 8, 12];
-            const requestedSeconds = Math.min(duration, 12);
+            // Sora-2 and Sora-2 Pro require "seconds" parameter
+            // Sora-2: 4, 8, or 12
+            // Sora-2 Pro: 4 (default, may support more)
+            const validSeconds = isSora2Pro ? [4] : [4, 8, 12];
+            const requestedSeconds = Math.min(duration, isSora2Pro ? 4 : 12);
             const soraSeconds = validSeconds.reduce((prev, curr) => 
               Math.abs(curr - requestedSeconds) < Math.abs(prev - requestedSeconds) ? curr : prev
             );
             modelInput.seconds = soraSeconds;
-            console.log(`[REPLICATE] Setting seconds parameter for Sora-2: ${soraSeconds} (requested: ${duration})`);
+            console.log(`[REPLICATE] Setting seconds parameter for ${isSora2Pro ? 'Sora-2 Pro' : 'Sora-2'}: ${soraSeconds} (requested: ${duration})`);
+            
+            // Sora-2 Pro specific: resolution parameter ("standard" or "high")
+            if (isSora2Pro) {
+              modelInput.resolution = 'standard'; // Default to "standard" (720p), can be "high" (1024p)
+              console.log(`[REPLICATE] Setting resolution parameter for Sora-2 Pro: ${modelInput.resolution}`);
+            }
+            
+            // Sora-2 Pro supports input_reference (image URL for first frame)
+            if (isSora2Pro && options.image) {
+              modelInput.input_reference = options.image;
+              console.log(`[REPLICATE] Adding input_reference parameter for Sora-2 Pro: ${options.image}`);
+            }
           } else if (isVeo3) {
             // Veo 3/3.1 format: prompt, aspect_ratio, duration, resolution, generate_audio, image, negative_prompt, seed
             // Veo 3.1 also supports: reference_images (array), last_frame
