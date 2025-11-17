@@ -528,7 +528,20 @@ export async function generateVideo(
             
             // Required parameters
             modelInput.aspect_ratio = veoAspectRatio;
-            modelInput.duration = Math.min(duration, 60); // Veo supports up to 60 seconds
+            
+            // Veo 3.1 duration must be one of: 4, 6, or 8
+            // Veo 3 duration can be up to 60 seconds
+            if (isVeo31) {
+              const validDurations = [4, 6, 8];
+              const requestedDuration = Math.min(duration, 8);
+              modelInput.duration = validDurations.reduce((prev, curr) => 
+                Math.abs(curr - requestedDuration) < Math.abs(prev - requestedDuration) ? curr : prev
+              );
+              console.log(`[REPLICATE] Veo 3.1 duration set to ${modelInput.duration} (requested: ${duration}, valid: 4, 6, 8)`);
+            } else {
+              modelInput.duration = Math.min(duration, 60); // Veo 3 supports up to 60 seconds
+            }
+            
             modelInput.resolution = '1080p'; // Default to 1080p
             modelInput.generate_audio = true; // Default to true (as per Veo 3 API)
             
