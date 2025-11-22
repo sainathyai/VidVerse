@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { Search, Plus, Film, Zap, CheckCircle2, DollarSign, Star, Calendar, Clock, Edit3, Trash2 } from "lucide-react";
+import { Search, Plus, Film, Zap, CheckCircle2, DollarSign, Star, Calendar, Clock, Edit3, Trash2, ChevronDown, Sparkles, Video } from "lucide-react";
 import { Header } from "../components/Header";
 
 interface Project {
@@ -85,8 +85,9 @@ function DashboardContent() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("active"); // Default: show completed and draft
+  const [statusFilter, setStatusFilter] = useState<string>("completed"); // Default: show completed projects
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
   const { getAccessToken } = useAuth();
 
   useEffect(() => {
@@ -473,22 +474,73 @@ function DashboardContent() {
                           
                           {/* Action Buttons - Top Right (on hover, below status badge) */}
                           <div className="absolute top-10 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2 z-20">
-                            <Button 
-                              size="sm" 
-                              className="bg-white/90 backdrop-blur-sm border-white/20 hover:bg-white text-black"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                navigate(`/project/${project.id}/edit`);
-                              }}
-                            >
-                              <Edit3 className="h-3 w-3 mr-1" />
-                              Edit
-                            </Button>
+                            {/* Edit Dropdown */}
+                            <div className="relative">
+                              <Button 
+                                size="sm" 
+                                className="bg-white/90 backdrop-blur-sm border-white/20 hover:bg-white text-black"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setOpenDropdownId(openDropdownId === project.id ? null : project.id);
+                                }}
+                              >
+                                <Edit3 className="h-3 w-3 mr-1" />
+                                Edit
+                                <ChevronDown className="h-3 w-3 ml-1" />
+                              </Button>
+                              
+                              {/* Dropdown Menu */}
+                              {openDropdownId === project.id && (
+                                <>
+                                  {/* Backdrop to close dropdown */}
+                                  <div 
+                                    className="fixed inset-0 z-20" 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setOpenDropdownId(null);
+                                    }}
+                                  />
+                                  <div className="absolute top-full right-0 mt-1 w-48 bg-black/95 backdrop-blur-xl border border-white/20 rounded-lg shadow-2xl overflow-hidden z-30">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenDropdownId(null);
+                                        // Navigate to quick create with project data
+                                        navigate(`/create?projectId=${project.id}`);
+                                      }}
+                                      className="w-full px-4 py-3 text-left text-white hover:bg-white/10 transition-colors flex items-center gap-2"
+                                    >
+                                      <Sparkles className="h-4 w-4 text-blue-400" />
+                                      <div>
+                                        <div className="font-medium text-sm">Quick Create</div>
+                                        <div className="text-xs text-white/60">Modify with saved assets</div>
+                                      </div>
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenDropdownId(null);
+                                        navigate(`/project/${project.id}/edit`);
+                                      }}
+                                      className="w-full px-4 py-3 text-left text-white hover:bg-white/10 transition-colors flex items-center gap-2 border-t border-white/10"
+                                    >
+                                      <Video className="h-4 w-4 text-purple-400" />
+                                      <div>
+                                        <div className="font-medium text-sm">Advanced Edit</div>
+                                        <div className="text-xs text-white/60">Full video editor</div>
+                                      </div>
+                                    </button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                            
                             <Button 
                               size="sm" 
                               className="bg-red-500/90 backdrop-blur-sm border-red-500/30 hover:bg-red-500 text-white"
                               onClick={(e) => {
                                 e.stopPropagation();
+                                setOpenDropdownId(null);
                                 handleDeleteProject(project.id, projectName);
                               }}
                             >

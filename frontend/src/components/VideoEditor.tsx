@@ -199,9 +199,33 @@ export function VideoEditor({ videoUrl, scenes, projectId, onSave, onClose }: Vi
 
   const handleCopySelected = () => {
     if (selectedSegments.size > 0) {
-      // Copy selected segments (would duplicate them in timeline)
-      console.log('Copy segments:', Array.from(selectedSegments));
-      // TODO: Implement copy functionality
+      // Find selected segments and create duplicates
+      const selectedSegmentIds = Array.from(selectedSegments);
+      const segmentsToCopy = segments.filter(s => selectedSegmentIds.includes(s.id));
+      
+      if (segmentsToCopy.length === 0) return;
+      
+      // Calculate the end time of the last segment to place copies after it
+      const lastSegmentEnd = Math.max(...segments.map(s => s.endTime), 0);
+      const firstSelectedStart = Math.min(...segmentsToCopy.map(s => s.startTime));
+      const offset = lastSegmentEnd - firstSelectedStart + 0.1; // Small gap between original and copy
+      
+      // Create copies with new IDs and adjusted times
+      const copiedSegments: VideoSegment[] = segmentsToCopy.map(segment => ({
+        ...segment,
+        id: `${segment.id}-copy-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        startTime: segment.startTime + offset,
+        endTime: segment.endTime + offset,
+        selected: false, // Deselect copied segments
+      }));
+      
+      // Add copied segments to the timeline
+      setSegments(prev => [...prev, ...copiedSegments].sort((a, b) => a.startTime - b.startTime));
+      
+      // Clear selection
+      setSelectedSegments(new Set());
+      
+      console.log(`Copied ${copiedSegments.length} segment(s) to timeline`);
     }
   };
 

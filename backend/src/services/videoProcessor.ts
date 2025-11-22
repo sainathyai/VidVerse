@@ -53,11 +53,11 @@ export async function extractFrames(
     console.log(`[VIDEO_PROCESSOR] Video downloaded, size: ${videoBuffer.length} bytes`);
 
     return new Promise((resolve, reject) => {
-      // Get video duration first
+      // Get video duration and frame rate first
       ffmpeg(videoPath)
         .ffprobe((err, metadata) => {
           if (err) {
-            // Cleanup temp files
+            // Cleanup temp files (fire-and-forget, don't block on it)
             fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
             // If ffprobe is not found, provide helpful error message
             if (err.message && err.message.includes('Cannot find ffprobe')) {
@@ -68,16 +68,64 @@ export async function extractFrames(
             return;
           }
 
-          const duration = metadata.format.duration || 0;
-          console.log(`[VIDEO_PROCESSOR] Video duration: ${duration} seconds`);
-
-          // Calculate safe timestamps
-          // First frame: 0.5s to avoid black frames
-          // Last frame: 0.5s before end, but at least 0.5s from start
-          const firstTimestamp = Math.min(0.5, duration * 0.1); // Use 10% of duration or 0.5s, whichever is smaller
-          const lastTimestamp = Math.max(firstTimestamp + 0.1, duration - 0.5); // 0.5s before end, but at least 0.1s after first frame
+          const duration = metadata.format?.duration || 0;
           
-          console.log(`[VIDEO_PROCESSOR] Extracting frames at ${firstTimestamp}s and ${lastTimestamp}s`);
+          // Validate duration
+          if (!duration || duration <= 0 || !isFinite(duration)) {
+            fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+            reject(new Error(`Invalid video duration: ${duration}. Video may be corrupted or empty.`));
+            return;
+          }
+          
+          // Get frame rate from video stream
+          // Try to get fps from video stream, fallback to r_frame_rate calculation
+          let fps = 30; // Default fallback
+          if (metadata.streams && metadata.streams.length > 0) {
+            const videoStream = metadata.streams.find((s: any) => s.codec_type === 'video');
+            if (videoStream) {
+              if (videoStream.r_frame_rate) {
+                // r_frame_rate is in format "30/1" or "29970/1000"
+                const [num, den] = videoStream.r_frame_rate.split('/').map(Number);
+                if (den && den > 0) {
+                  fps = num / den;
+                }
+              } else if (videoStream.avg_frame_rate) {
+                const [num, den] = videoStream.avg_frame_rate.split('/').map(Number);
+                if (den && den > 0) {
+                  fps = num / den;
+                }
+              }
+            }
+          }
+          
+          console.log(`[VIDEO_PROCESSOR] Video duration: ${duration} seconds, FPS: ${fps}`);
+
+          // Calculate timestamps
+          // First frame: 0.5s to avoid black frames
+          const firstTimestamp = Math.min(0.5, duration * 0.1); // Use 10% of duration or 0.5s, whichever is smaller
+          
+          // Last frame: Calculate exact timestamp of the last frame
+          // Frame interval = 1/fps
+          // Last frame time = duration - (1/fps) to get the exact last frame
+          // For very short videos, ensure it's at least one frame interval after the first frame
+          const frameInterval = 1 / fps;
+          let lastTimestamp = duration - frameInterval; // Exact last frame timestamp
+          
+          // Safety check: ensure last frame is after first frame (for very short videos)
+          if (lastTimestamp <= firstTimestamp || lastTimestamp < 0) {
+            // For extremely short videos, use a position that's at least one frame after the first
+            lastTimestamp = Math.max(firstTimestamp + frameInterval, Math.min(duration * 0.9, duration - 0.01)); // At least 0.01s before end, or 90% of duration
+            console.warn(`[VIDEO_PROCESSOR] Video is very short (${duration}s), adjusting last frame timestamp to ${lastTimestamp}s`);
+          }
+          
+          // Final validation: ensure timestamps are valid
+          if (firstTimestamp < 0 || lastTimestamp < 0 || firstTimestamp >= duration || lastTimestamp >= duration) {
+            fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+            reject(new Error(`Invalid timestamps calculated: first=${firstTimestamp}s, last=${lastTimestamp}s, duration=${duration}s`));
+            return;
+          }
+          
+          console.log(`[VIDEO_PROCESSOR] Extracting first frame at ${firstTimestamp}s and last frame at ${lastTimestamp}s (frame interval: ${frameInterval.toFixed(4)}s)`);
 
           // Extract first frame
           ffmpeg(videoPath)
@@ -87,10 +135,16 @@ export async function extractFrames(
               folder: tempDir,
               size: '1920x1080',
             })
-            .on('end', () => {
-              console.log(`[VIDEO_PROCESSOR] First frame extracted at ${firstTimestamp}s`);
-              // Extract last frame
-              ffmpeg(videoPath)
+            .on('end', async () => {
+              try {
+                // Verify first frame file exists
+                await fs.access(firstFramePath);
+                console.log(`[VIDEO_PROCESSOR] First frame extracted at ${firstTimestamp}s`);
+                
+                // Extract last frame using calculated timestamp (duration - frame interval)
+                // This gives us the exact last frame, not 0.5s before the end
+                // Use screenshots with the calculated lastTimestamp which is: duration - (1/fps)
+                ffmpeg(videoPath)
                 .screenshots({
                   timestamps: [lastTimestamp],
                   filename: `last-${sceneNumber}.jpg`,
@@ -99,10 +153,29 @@ export async function extractFrames(
                 })
                 .on('end', async () => {
                   try {
-                    console.log(`[VIDEO_PROCESSOR] Last frame extracted at ${lastTimestamp}s`);
+                    console.log(`[VIDEO_PROCESSOR] Last frame extracted at ${lastTimestamp}s (calculated from duration ${duration}s - frame interval ${frameInterval.toFixed(4)}s)`);
+                    
+                    // Verify frame files exist before reading
+                    try {
+                      await fs.access(firstFramePath);
+                      await fs.access(lastFramePath);
+                    } catch (accessError) {
+                      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+                      reject(new Error(`Frame files not created: ${accessError instanceof Error ? accessError.message : 'Unknown error'}`));
+                      return;
+                    }
+                    
                     // Upload frames to S3
                     const firstFrameBuffer = await fs.readFile(firstFramePath);
                     const lastFrameBuffer = await fs.readFile(lastFramePath);
+                    
+                    // Validate frame buffers are not empty
+                    if (!firstFrameBuffer || firstFrameBuffer.length === 0) {
+                      throw new Error('First frame buffer is empty');
+                    }
+                    if (!lastFrameBuffer || lastFrameBuffer.length === 0) {
+                      throw new Error('Last frame buffer is empty');
+                    }
 
                     const [firstFrameResult, lastFrameResult] = await Promise.all([
                       uploadFrame(firstFrameBuffer, userId, projectId, `scene-${sceneNumber}`, 'first'),
@@ -116,20 +189,22 @@ export async function extractFrames(
                       firstFrameUrl: firstFrameResult.url,
                       lastFrameUrl: lastFrameResult.url,
                     });
-                  } catch (error) {
+                  } catch (error: any) {
                     await fs.rm(tempDir, { recursive: true, force: true });
                     reject(error);
                   }
                 })
                 .on('error', async (err) => {
                   await fs.rm(tempDir, { recursive: true, force: true });
-                  // If last frame extraction fails, try using the first frame as fallback
-                  console.warn(`[VIDEO_PROCESSOR] Failed to extract last frame at ${lastTimestamp}s, error: ${err.message}`);
-                  reject(new Error(`Failed to extract last frame at ${lastTimestamp}s: ${err.message}. Video duration: ${duration}s`));
+                  reject(new Error(`Failed to extract last frame at ${lastTimestamp}s: ${err.message}. Video duration: ${duration}s, FPS: ${fps}, Frame interval: ${frameInterval.toFixed(4)}s`));
                 });
+              } catch (firstFrameError: any) {
+                await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+                reject(new Error(`First frame file not created or inaccessible: ${firstFrameError.message}`));
+              }
             })
             .on('error', async (err) => {
-              await fs.rm(tempDir, { recursive: true, force: true });
+              await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
               reject(new Error(`Failed to extract first frame at ${firstTimestamp}s: ${err.message}`));
             });
         });
@@ -194,6 +269,7 @@ export async function addAudioToVideo(
 ): Promise<void> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vidverse-audio-'));
   const audioPath = path.join(tempDir, 'audio.mp3');
+  const loopedAudioPath = path.join(tempDir, 'audio-looped.mp3');
 
   // Download audio
   const response = await fetch(audioUrl);
@@ -201,26 +277,93 @@ export async function addAudioToVideo(
   await fs.writeFile(audioPath, Buffer.from(buffer));
 
   return new Promise((resolve, reject) => {
+    // First, get video duration
     ffmpeg(videoPath)
-      .input(audioPath)
-      .outputOptions([
-        '-c:v', 'copy', // Copy video codec
-        '-c:a', 'aac', // Encode audio as AAC
-        '-shortest', // Match shortest stream
-        '-map', '0:v:0', // Map video from first input
-        '-map', '1:a:0', // Map audio from second input
-      ])
-      .output(outputPath)
-      .on('end', async () => {
-        await fs.rm(tempDir, { recursive: true, force: true });
-        resolve();
-      })
-      .on('error', async (err) => {
-        await fs.rm(tempDir, { recursive: true, force: true });
-        reject(err);
-      })
-      .run();
+      .ffprobe((err, metadata) => {
+        if (err) {
+          fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+          reject(new Error(`Failed to probe video: ${err.message}`));
+          return;
+        }
+
+        const videoDuration = metadata.format?.duration || 0;
+        
+        if (videoDuration <= 0 || !isFinite(videoDuration)) {
+          fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+          reject(new Error('Invalid video duration'));
+          return;
+        }
+
+        // Get audio duration
+        ffmpeg(audioPath)
+          .ffprobe((audioErr, audioMetadata) => {
+            if (audioErr) {
+              fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+              reject(new Error(`Failed to probe audio: ${audioErr.message}`));
+              return;
+            }
+
+            const audioDuration = audioMetadata.format?.duration || 0;
+            
+            // If audio is shorter than video, loop it to match video length
+            if (audioDuration > 0 && audioDuration < videoDuration) {
+              const loopCount = Math.ceil(videoDuration / audioDuration);
+              console.log(`[VIDEO_PROCESSOR] Audio (${audioDuration.toFixed(2)}s) is shorter than video (${videoDuration.toFixed(2)}s). Looping ${loopCount} times.`);
+              
+              // Create looped audio using filter_complex
+              ffmpeg()
+                .input(audioPath)
+                .inputOptions(['-stream_loop', String(loopCount - 1)]) // Loop count (0 = no loop, 1 = play twice, etc.)
+                .outputOptions([
+                  '-t', String(videoDuration), // Trim to exact video duration
+                  '-c:a', 'aac',
+                ])
+                .output(loopedAudioPath)
+                .on('end', () => {
+                  // Now add the looped audio to video
+                  addAudioToVideoWithPath(videoPath, loopedAudioPath, outputPath, tempDir, resolve, reject);
+                })
+                .on('error', async (loopErr) => {
+                  await fs.rm(tempDir, { recursive: true, force: true });
+                  reject(new Error(`Failed to loop audio: ${loopErr.message}`));
+                })
+                .run();
+            } else {
+              // Audio is long enough, use it directly
+              addAudioToVideoWithPath(videoPath, audioPath, outputPath, tempDir, resolve, reject);
+            }
+          });
+      });
   });
+}
+
+function addAudioToVideoWithPath(
+  videoPath: string,
+  audioPath: string,
+  outputPath: string,
+  tempDir: string,
+  resolve: () => void,
+  reject: (err: Error) => void
+): void {
+  ffmpeg(videoPath)
+    .input(audioPath)
+    .outputOptions([
+      '-c:v', 'copy', // Copy video codec
+      '-c:a', 'aac', // Encode audio as AAC
+      '-shortest', // Match shortest stream (should be video now since audio is looped/extended)
+      '-map', '0:v:0', // Map video from first input
+      '-map', '1:a:0', // Map audio from second input
+    ])
+    .output(outputPath)
+    .on('end', async () => {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      resolve();
+    })
+    .on('error', async (err) => {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      reject(err);
+    })
+    .run();
 }
 
 /**

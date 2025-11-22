@@ -6,7 +6,7 @@ export const projectSchema = z.object({
     required_error: "Please select a category",
   }),
   prompt: z.string().min(10, "Prompt must be at least 10 characters"),
-  duration: z.number().min(15, "Duration must be at least 15 seconds").max(300, "Duration must be less than 5 minutes"),
+  duration: z.number().min(4, "Duration must be at least 4 seconds").max(300, "Duration must be less than 5 minutes"),
   style: z.string().optional(),
   mood: z.string().optional(),
   constraints: z.string().optional(),

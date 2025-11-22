@@ -109,8 +109,73 @@ export async function chatRoutes(fastify: FastifyInstance, options: FastifyPlugi
     const data = chatMessageSchema.parse(request.body);
 
     try {
+      // Check if user is requesting structured project generation (concept to full project)
+      const isConceptGeneration = /(generate|create|build|make).*(full|complete|entire|whole|project|script|scenes|assets|music)/i.test(data.message) || 
+                                   /(concept|idea|basic).*(elaborate|expand|generate|create|build)/i.test(data.message) ||
+                                   /(import|json|structured|format)/i.test(data.message);
+
       // Build system prompt with project context if available
-      let systemPrompt = `You are an expert AI video creation assistant helping users craft exceptional video projects. Your role is to:
+      let systemPrompt = isConceptGeneration 
+        ? `You are an expert AI video creation assistant specializing in generating complete, structured video projects from basic concepts. 
+
+When a user provides a basic concept (2-3 lines), you must generate a COMPLETE structured project in JSON format that includes:
+
+1. **Detailed Script**: A comprehensive, detailed script that elaborates on the concept with rich visual descriptions, camera movements, transitions, and narrative flow.
+
+2. **Assets Array**: Extract all key visual assets mentioned in the script. Each asset should have:
+   - name: A descriptive name (e.g., "Vintage Tour Bus", "Desert Highway", "Band Member Portrait")
+   - prompt: A detailed prompt for generating that asset as an image
+
+3. **Scenes Array**: Break the script into logical scenes. Each scene should have:
+   - sceneNumber: Sequential number (1, 2, 3, etc.)
+   - prompt: Detailed scene description with visual specifications
+   - assetIds: Array of asset names/IDs that belong to this scene (matching asset names from assets array)
+
+4. **Music Prompt**: Generate a JSON-formatted music prompt with:
+   - lyrics: Song lyrics or description (if applicable)
+   - prompt: Musical style description
+   - bitrate: "320" (default)
+   - sample_rate: "44100" (default)
+   - audio_format: "mp3" (default)
+
+CRITICAL FORMATTING REQUIREMENTS:
+- Your response must be in PLAIN TEXT format for user readability
+- But it MUST contain a valid JSON object that can be extracted and parsed
+- The JSON should be wrapped in \`\`\`json code blocks for easy extraction
+- The JSON structure must be:
+{
+  "script": "Full detailed script text here...",
+  "assets": [
+    {
+      "name": "Asset Name 1",
+      "prompt": "Detailed prompt for generating this asset..."
+    },
+    ...
+  ],
+  "scenes": [
+    {
+      "sceneNumber": 1,
+      "prompt": "Detailed scene description with visual specifications...",
+      "assetIds": ["Asset Name 1", "Asset Name 2"]
+    },
+    ...
+  ],
+  "music": {
+    "lyrics": "Song lyrics or description",
+    "prompt": "Musical style description",
+    "bitrate": "320",
+    "sample_rate": "44100",
+    "audio_format": "mp3"
+  }
+}
+
+- Include as many details as possible in each scene prompt
+- Determine which assets belong to which scenes based on the script
+- Make the script comprehensive and cinematic
+- Ensure all prompts are detailed enough for AI video/image generation
+
+After generating the JSON, provide a brief summary in plain text explaining what was generated.`
+        : `You are an expert AI video creation assistant helping users craft exceptional video projects. Your role is to:
 
 1. **Context Awareness**: 
    - You have access to the user's current project settings and conversation history
@@ -230,7 +295,7 @@ CRITICAL: Review the conversation history and project context before asking any 
           'X-Title': 'VidVerse AI Assistant',
         },
         body: JSON.stringify({
-          model: data.model || config.openrouter.model || 'openai/gpt-4o-mini',
+          model: data.model || config.openrouter.model || 'anthropic/claude-4.5-sonnet',
           messages: messages,
           temperature: 0.8, // Slightly higher for more creative and conversational responses
           max_tokens: 16000, // Dramatically increased for very long, detailed responses

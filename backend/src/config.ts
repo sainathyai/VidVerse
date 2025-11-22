@@ -101,7 +101,7 @@ export const config = {
 
   openrouter: {
     apiKey: process.env.OPENROUTER_API_KEY,
-    model: process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini',
+    model: process.env.OPENROUTER_MODEL || 'anthropic/claude-4.5-sonnet',
   },
 
   app: {

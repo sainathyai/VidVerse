@@ -89,6 +89,8 @@ function ProjectEditorContent() {
   const [isStitching, setIsStitching] = useState(false);
   const [showVideoEditor, setShowVideoEditor] = useState(false);
   const [showAddMusicModal, setShowAddMusicModal] = useState(false);
+  const [showEditMusicModal, setShowEditMusicModal] = useState(false);
+  const [editingTrack, setEditingTrack] = useState<{ id: string; url: string; startTime: number; duration: number; volume: number; name?: string } | null>(null);
   const [isAddingAudio, setIsAddingAudio] = useState(false);
   const [isSavingToS3, setIsSavingToS3] = useState(false);
   const [videoSavedToS3, setVideoSavedToS3] = useState(false);
@@ -603,9 +605,66 @@ function ProjectEditorContent() {
       <div className="relative z-10 flex flex-col h-full">
         <Header 
           showProjectEditor={true}
-          onSaveProject={() => {
-            // TODO: Implement save project functionality
-            console.log('Save project clicked');
+          onSaveProject={async () => {
+            try {
+              const token = await getAccessToken();
+              if (!token || !id) return;
+
+              // Prepare update data
+              const updateData: any = {};
+              
+              // Save project name if changed
+              if (projectName) {
+                updateData.name = projectName;
+              }
+
+              // Save config with current state (audio tracks, scenes, etc.)
+              const currentConfig: any = {};
+              
+              // Save audio tracks if any
+              if (audioTracks.length > 0) {
+                currentConfig.audioTracks = audioTracks;
+              }
+
+              // Save scene URLs if available
+              if (scenes.length > 0) {
+                const sceneUrls = scenes
+                  .filter(s => s.videoUrl)
+                  .map(s => s.videoUrl!)
+                  .sort((a, b) => {
+                    const sceneA = scenes.find(s => s.videoUrl === a);
+                    const sceneB = scenes.find(s => s.videoUrl === b);
+                    return (sceneA?.sceneNumber || 0) - (sceneB?.sceneNumber || 0);
+                  });
+                if (sceneUrls.length > 0) {
+                  currentConfig.sceneUrls = sceneUrls;
+                }
+              }
+
+              // Save final video URL if available
+              if (stitchedVideo) {
+                currentConfig.finalVideoUrl = stitchedVideo;
+                currentConfig.videoUrl = stitchedVideo;
+              }
+
+              if (Object.keys(currentConfig).length > 0) {
+                updateData.config = currentConfig;
+              }
+
+              // Only make API call if there's something to update
+              if (Object.keys(updateData).length > 0) {
+                await apiRequest(`/api/projects/${id}`, {
+                  method: 'PATCH',
+                  body: JSON.stringify(updateData),
+                }, token);
+                
+                console.log('Project saved successfully');
+                // You could add a toast notification here
+              }
+            } catch (error) {
+              console.error('Error saving project:', error);
+              // You could add error toast notification here
+            }
           }}
         />
 
@@ -1413,8 +1472,8 @@ function ProjectEditorContent() {
                           setShowAddMusicModal(true);
                         }}
                         onEditMusic={(track) => {
-                          // TODO: Open edit dialog for track
-                          console.log('Edit track:', track);
+                          setEditingTrack(track);
+                          setShowEditMusicModal(true);
                         }}
                         onRemoveMusic={(trackId) => {
                           setAudioTracks(prev => prev.filter(t => t.id !== trackId));
@@ -1452,15 +1511,22 @@ function ProjectEditorContent() {
                                 console.log('Refreshing final video...');
                                 const project = await apiRequest<{ 
                                   status?: string;
-                                  config?: { videoUrl?: string } 
+                                  config?: { 
+                                    videoUrl?: string;
+                                    finalVideoUrl?: string;
+                                  } 
                                 }>(`/api/projects/${id}`, { method: 'GET' }, token);
                                 console.log('Refreshed project:', { 
                                   status: project.status, 
-                                  videoUrl: project.config?.videoUrl 
+                                  videoUrl: project.config?.videoUrl,
+                                  finalVideoUrl: project.config?.finalVideoUrl
                                 });
-                                if (project.config?.videoUrl) {
-                                  console.log('Setting final video URL from refresh:', project.config.videoUrl);
-                                  setStitchedVideo(project.config.videoUrl);
+                                // Prefer finalVideoUrl over videoUrl (matching initial load logic)
+                                const videoUrlToUse = project.config?.finalVideoUrl || project.config?.videoUrl;
+                                if (videoUrlToUse) {
+                                  console.log('Setting final video URL from refresh:', videoUrlToUse);
+                                  setStitchedVideo(videoUrlToUse);
+                                  setVideoSavedToS3(project.status === 'completed');
                                 } else {
                                   console.warn('No video URL found after refresh');
                                 }
@@ -1489,8 +1555,8 @@ function ProjectEditorContent() {
                         setShowAddMusicModal(true);
                       }}
                       onEditMusic={(track) => {
-                        // TODO: Open edit dialog for track
-                        console.log('Edit track:', track);
+                        setEditingTrack(track);
+                        setShowEditMusicModal(true);
                       }}
                       onRemoveMusic={(trackId) => {
                         setAudioTracks(prev => prev.filter(t => t.id !== trackId));
@@ -1660,6 +1726,127 @@ function ProjectEditorContent() {
           }}
           onClose={() => setShowVideoEditor(false)}
         />
+      )}
+
+      {/* Edit Music Modal */}
+      {showEditMusicModal && editingTrack && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center">
+          <div className="bg-black/90 border border-white/10 rounded-lg p-6 max-w-md w-full mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-white">Edit Audio Track</h3>
+              <button
+                onClick={() => {
+                  setShowEditMusicModal(false);
+                  setEditingTrack(null);
+                }}
+                className="p-1 hover:bg-white/10 rounded transition-colors text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-white/70 mb-2">
+                  Track Name
+                </label>
+                <input
+                  type="text"
+                  value={editingTrack.name || ''}
+                  onChange={(e) => {
+                    setEditingTrack({ ...editingTrack, name: e.target.value });
+                  }}
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter track name"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-white/70 mb-2">
+                  Start Time (seconds)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  max={videoDuration}
+                  step="0.1"
+                  value={editingTrack.startTime}
+                  onChange={(e) => {
+                    const startTime = Math.max(0, Math.min(videoDuration, parseFloat(e.target.value) || 0));
+                    setEditingTrack({ ...editingTrack, startTime });
+                  }}
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-white/70 mb-2">
+                  Duration (seconds)
+                </label>
+                <input
+                  type="number"
+                  min="0.1"
+                  max={videoDuration - editingTrack.startTime}
+                  step="0.1"
+                  value={editingTrack.duration}
+                  onChange={(e) => {
+                    const maxDuration = videoDuration - editingTrack.startTime;
+                    const duration = Math.max(0.1, Math.min(maxDuration, parseFloat(e.target.value) || 0.1));
+                    setEditingTrack({ ...editingTrack, duration });
+                  }}
+                  className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-white/70 mb-2">
+                  Volume: {Math.round(editingTrack.volume * 100)}%
+                </label>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={editingTrack.volume}
+                  onChange={(e) => {
+                    setEditingTrack({ ...editingTrack, volume: parseFloat(e.target.value) });
+                  }}
+                  className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                />
+                <div className="flex justify-between text-xs text-white/50 mt-1">
+                  <span>0%</span>
+                  <span>100%</span>
+                </div>
+              </div>
+
+              <div className="flex gap-3 pt-4">
+                <button
+                  onClick={() => {
+                    setShowEditMusicModal(false);
+                    setEditingTrack(null);
+                  }}
+                  className="flex-1 px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-white transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (editingTrack) {
+                      setAudioTracks(prev => prev.map(t => 
+                        t.id === editingTrack.id ? editingTrack : t
+                      ));
+                      setShowEditMusicModal(false);
+                      setEditingTrack(null);
+                    }
+                  }}
+                  className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white transition-colors"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Add Music Modal */}

@@ -264,10 +264,12 @@ export async function assetRoutes(fastify: FastifyInstance, options: FastifyPlug
     const { assetId } = request.params as { assetId: string };
     const user = getCognitoUser(request);
     const { query } = await import('../services/database');
+    const { S3Client, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+    const { config } = await import('../config');
 
-    // Verify asset belongs to user's project
+    // Verify asset belongs to user's project and get the URL
     const asset = await query(
-      `SELECT a.id FROM assets a
+      `SELECT a.id, a.url FROM assets a
        JOIN projects p ON a.project_id = p.id
        WHERE a.id = $1 AND p.user_id = $2`,
       [assetId, user.sub]
@@ -277,7 +279,54 @@ export async function assetRoutes(fastify: FastifyInstance, options: FastifyPlug
       return reply.code(404).send({ error: 'Asset not found' });
     }
 
-    // Delete asset
+    const assetUrl = asset[0].url;
+
+    // Delete from S3 if it's an S3 URL
+    try {
+      if (assetUrl && (assetUrl.includes('amazonaws.com') || assetUrl.includes(config.storage.bucketName))) {
+        // Extract S3 key from URL
+        const bucket = config.storage.bucketName;
+        let s3Key: string | null = null;
+
+        // Try to extract key from URL
+        const bucketIndex = assetUrl.indexOf(`/${bucket}/`);
+        if (bucketIndex !== -1) {
+          s3Key = assetUrl.substring(bucketIndex + bucket.length + 2).split('?')[0];
+        } else if (assetUrl.includes(`/${bucket}/`)) {
+          const parts = assetUrl.split(`/${bucket}/`);
+          if (parts.length > 1) {
+            s3Key = parts[1].split('?')[0];
+          }
+        }
+
+        if (s3Key) {
+          const s3Client = new S3Client({
+            region: config.storage.region,
+            endpoint: config.storage.endpoint,
+            credentials: config.storage.accessKeyId && config.storage.secretAccessKey
+              ? {
+                  accessKeyId: config.storage.accessKeyId,
+                  secretAccessKey: config.storage.secretAccessKey,
+                }
+              : undefined,
+            forcePathStyle: config.storage.endpoint?.includes('localhost') || config.storage.endpoint?.includes('127.0.0.1'),
+          });
+
+          const deleteCommand = new DeleteObjectCommand({
+            Bucket: bucket,
+            Key: decodeURIComponent(s3Key),
+          });
+
+          await s3Client.send(deleteCommand);
+          fastify.log.info({ assetId, s3Key }, 'Deleted asset from S3');
+        }
+      }
+    } catch (s3Error: any) {
+      // Log but don't fail - asset might not be in S3 or already deleted
+      fastify.log.warn({ assetId, error: s3Error?.message }, 'Failed to delete asset from S3, continuing with database deletion');
+    }
+
+    // Delete asset from database
     await query('DELETE FROM assets WHERE id = $1', [assetId]);
 
     return { success: true };

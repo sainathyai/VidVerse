@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ProtectedRoute } from "../components/auth/ProtectedRoute";
 import { useAuth } from "../components/auth/AuthProvider";
 import { apiRequest } from "../lib/api";
@@ -7,8 +7,31 @@ import { Header } from "../components/Header";
 import { VideoGenerationProgressModal } from "../components/VideoGenerationProgressModal";
 import { SynchronousVideoProgressModal } from "../components/SynchronousVideoProgressModal";
 import { ProjectConfirmationModal } from "../components/ProjectConfirmationModal";
-import { Sparkles, ArrowRight, Settings, ArrowLeft, Pencil, Check, X, RotateCcw, Bot } from "lucide-react";
+import { PreviewModal } from "../components/PreviewModal";
+import { Sparkles, ArrowRight, Settings, ArrowLeft, Pencil, Check, X, RotateCcw, Bot, Image as ImageIcon, FileText, ChevronRight, Loader2, Plus, Play, Video as VideoIcon } from "lucide-react";
 import { AIChatPanel } from "../components/AIChatPanel";
+import { LeftPanel } from "../components/SimpleCreate/LeftPanel";
+import { MiddleSection } from "../components/SimpleCreate/MiddleSection";
+
+const MAX_ANCHOR_ASSETS = 5;
+
+type AnchorImage = {
+  id: string;
+  assetId?: string;
+  url: string;
+  prompt: string;
+  assetNumber: number;
+  isTemporary?: boolean;
+};
+
+const renumberAnchorImages = (images: AnchorImage[]): AnchorImage[] => {
+  return images
+    .slice(0, MAX_ANCHOR_ASSETS)
+    .map((image, index) => ({
+      ...image,
+      assetNumber: index + 1,
+    }));
+};
 
 function SimpleCreateContent() {
   const [category, setCategory] = useState<"music_video" | "ad_creative" | "explainer">("ad_creative");
@@ -25,15 +48,18 @@ function SimpleCreateContent() {
   const [isEditingProjectName, setIsEditingProjectName] = useState(false);
   const [tempProjectName, setTempProjectName] = useState("");
   const [prompt, setPrompt] = useState(categoryPrompts.ad_creative);
-  const [style, setStyle] = useState("cinematic");
-  const [mood, setMood] = useState("energetic");
+  const [style, setStyle] = useState("realistic");
+  const [mood, setMood] = useState("serious");
   const [aspectRatio, setAspectRatio] = useState("16:9");
-  const [duration, setDuration] = useState(15);
-  const [colorPalette, setColorPalette] = useState("vibrant");
+  const [duration, setDuration] = useState(30); // Default to 30 seconds (will be split into max 4 scenes of ~8s each)
+  const [colorPalette, setColorPalette] = useState("warm");
   const [pacing, setPacing] = useState("medium");
   const [videoModelId, setVideoModelId] = useState('google/veo-3.1');
-  const [imageModelId, setImageModelId] = useState('openai/dall-e-3');
+  const [imageModelId, setImageModelId] = useState('google/imagen-4-ultra');
   const [useReferenceFrame, setUseReferenceFrame] = useState(false);
+  const [continuous, setContinuous] = useState(false);
+  const [parallel, setParallel] = useState(false);
+  const [isGeneratingAll, setIsGeneratingAll] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [showConfirmationModal, setShowConfirmationModal] = useState(false);
   const [showProgressModal, setShowProgressModal] = useState(false);
@@ -53,8 +79,88 @@ function SimpleCreateContent() {
   const [generatedScript, setGeneratedScript] = useState<string>('');
   const [editedScript, setEditedScript] = useState<string>('');
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+  const [anchorImagePrompts, setAnchorImagePrompts] = useState<string[]>(['']);
+  const [expandedAssetIndex, setExpandedAssetIndex] = useState<number | null>(0); // Default to asset 1 (index 0)
+  const [isGeneratingAssets, setIsGeneratingAssets] = useState<boolean[]>([]);
+  const [generatedAnchorImages, setGeneratedAnchorImages] = useState<AnchorImage[]>([]);
+  const [showAnchorImageModal, setShowAnchorImageModal] = useState(false);
+  const [selectedAnchorImageIndex, setSelectedAnchorImageIndex] = useState(0);
+  
+  // Scene management
+  interface Scene {
+    id: string;
+    prompt: string;
+    videoUrl?: string;
+    firstFrameUrl?: string;
+    lastFrameUrl?: string;
+    extendPrevious: boolean;
+    selectedAssetIds: string[];
+    isGenerating: boolean;
+  }
+  const [scenes, setScenes] = useState<Scene[]>([
+    { id: 'scene-1', prompt: '', extendPrevious: false, selectedAssetIds: [], isGenerating: false },
+  ]);
+  const [showSceneModal, setShowSceneModal] = useState<{ sceneId: string; isOpen: boolean; currentIndex: number }>({ sceneId: '', isOpen: false, currentIndex: 0 });
+  const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null);
+  const [musicPrompt, setMusicPrompt] = useState<string>('');
+  const [generatedMusicUrl, setGeneratedMusicUrl] = useState<string | null>(null);
+  const [isGeneratingMusic, setIsGeneratingMusic] = useState(false);
+  const [isStitching, setIsStitching] = useState(false);
   const { getAccessToken } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const projectIdFromUrl = searchParams.get('projectId');
+  
+  // Auto-save debounce timers
+  const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [isAutoSaving, setIsAutoSaving] = useState(false);
+  const isLoadingProjectRef = useRef<string | null>(null);
+
+  const loadProjectAssets = useCallback(async (projectId: string): Promise<string[] | null> => {
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        return null;
+      }
+
+      const assets = await apiRequest<Array<{ id: string; type: string; url: string; filename: string; metadata?: Record<string, any> }>>(
+        `/api/projects/${projectId}/assets`,
+        { method: 'GET' },
+        token
+      );
+
+      if (!assets || assets.length === 0) {
+        console.log(`[FRONTEND] No assets found for project ${projectId}`);
+        setGeneratedAnchorImages([]);
+        return null;
+      }
+
+      const imageAssets: AnchorImage[] = assets
+        .filter(asset => asset.type === 'image')
+        .slice(0, MAX_ANCHOR_ASSETS)
+        .map((asset, index) => ({
+          id: asset.id,
+          assetId: asset.id,
+          url: asset.url,
+          prompt: (asset.metadata?.prompt as string) || asset.filename || `Asset ${index + 1}`,
+          assetNumber: index + 1,
+          isTemporary: false,
+        }));
+
+      console.log(`[FRONTEND] Loaded ${imageAssets.length} assets from database for project ${projectId}`);
+      setGeneratedAnchorImages(renumberAnchorImages(imageAssets));
+
+      // Extract prompts from assets for use in text boxes
+      const assetPrompts = imageAssets.map(asset => asset.prompt || '');
+      while (assetPrompts.length < MAX_ANCHOR_ASSETS) {
+        assetPrompts.push('');
+      }
+      return assetPrompts.slice(0, MAX_ANCHOR_ASSETS);
+    } catch (error) {
+      console.error('Failed to load project assets:', error);
+      return null;
+    }
+  }, [getAccessToken]);
 
   // Prebuilt options
   const styleOptions = [
@@ -86,11 +192,11 @@ function SimpleCreateContent() {
   ];
 
   const durationOptions = [
-    { value: 5, label: "5 seconds", description: "Minimum" },
-    { value: 15, label: "15 seconds", description: "Quick" },
-    { value: 30, label: "30 seconds", description: "Short" },
-    { value: 60, label: "60 seconds", description: "Standard" },
-    { value: 90, label: "90 seconds", description: "Extended" },
+    { value: 30, label: "30 seconds", description: "Default - 4 scenes" },
+    { value: 60, label: "60 seconds", description: "8 scenes" },
+    { value: 90, label: "90 seconds", description: "12 scenes" },
+    { value: 120, label: "120 seconds", description: "15 scenes" },
+    { value: 240, label: "240 seconds", description: "30 scenes" },
   ];
 
   const colorPaletteOptions = [
@@ -122,6 +228,19 @@ function SimpleCreateContent() {
     { value: 'google/imagen-4-ultra', label: 'Imagen 4 Ultra' },
     { value: 'google/imagen-4', label: 'Imagen 4' },
   ];
+
+  const glassSelectStyle = {
+    paddingRight: '2.75rem',
+    backgroundImage: 'linear-gradient(135deg, rgba(24,48,84,0.85), rgba(40,24,80,0.85), rgba(62,20,66,0.75))',
+    backgroundColor: 'rgba(5, 8, 18, 0.95)',
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  };
+
+  const glassTextareaStyle = {
+    backgroundImage: 'linear-gradient(135deg, rgba(24,48,84,0.8), rgba(40,24,80,0.78), rgba(62,20,66,0.72))',
+    backgroundColor: 'rgba(6, 8, 20, 0.92)',
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  };
 
   // Update prompt when category changes
   const handleCategoryChange = (newCategory: typeof category) => {
@@ -304,188 +423,87 @@ function SimpleCreateContent() {
   };
 
   // Initialize project name on mount
+  // Load project data when projectId is provided in URL
   useEffect(() => {
-    if (!projectName) {
-      getAutoProjectName().then(name => {
-        setProjectName(name);
-      });
-    }
-  }, []);
-
-  // Handle project name editing
-  const startEditingProjectName = () => {
-    setTempProjectName(projectName);
-    setIsEditingProjectName(true);
-  };
-
-  const saveProjectName = async () => {
-    const trimmed = tempProjectName.trim();
-    if (trimmed) {
-      setProjectName(trimmed);
-    } else {
-      const autoName = await getAutoProjectName();
-      setProjectName(autoName);
-    }
-    setIsEditingProjectName(false);
-  };
-
-  const cancelEditingProjectName = () => {
-    setTempProjectName("");
-    setIsEditingProjectName(false);
-  };
-
-  // Reset form to defaults
-  const resetForm = () => {
-    if (confirm('Are you sure you want to reset all fields? This will clear your current input.')) {
-      setProjectName("");
-      setPrompt(categoryPrompts.ad_creative);
-      setStyle("cinematic");
-      setMood("energetic");
-      setAspectRatio("16:9");
-      setDuration(15);
-      setColorPalette("vibrant");
-      setPacing("medium");
-      setCostPerSecond(0.20);
-      setCategory("ad_creative");
-      // Re-populate project name
-      getAutoProjectName().then(name => {
-        setProjectName(name);
-      });
-    }
-  };
-
-  // Save draft to S3
-  const saveDraft = async () => {
-    try {
-      const token = await getAccessToken();
-      if (!token) {
-        alert('Please log in to save drafts.');
-        return;
+    if (projectIdFromUrl) {
+      // Prevent duplicate loading
+      if (isLoadingProjectRef.current === projectIdFromUrl) {
+        return; // Already loading this project
       }
-
-      const draft = {
-        projectName,
-        category,
-        prompt,
-        style,
-        mood,
-        aspectRatio,
-        duration,
-        colorPalette,
-        pacing,
-        videoModelId,
-        imageModelId,
-        savedAt: new Date().toISOString(),
+      
+      // Set current project ID immediately to prevent ensureProjectExists from creating a new project
+      setCurrentProjectId(projectIdFromUrl);
+      // Clear assets when switching projects
+      setGeneratedAnchorImages([]);
+      // Mark as loading
+      isLoadingProjectRef.current = projectIdFromUrl;
+      
+      // Load project data (only once per projectId change)
+      let cancelled = false;
+      loadProjectData(projectIdFromUrl)
+        .then(() => {
+          if (!cancelled) {
+            isLoadingProjectRef.current = null;
+          }
+        })
+        .catch(err => {
+          if (!cancelled) {
+            console.error('Error loading project data:', err);
+            isLoadingProjectRef.current = null;
+          }
+        });
+      
+      return () => {
+        cancelled = true;
+        // Only clear the ref if we're cancelling the same project
+        if (isLoadingProjectRef.current === projectIdFromUrl) {
+          isLoadingProjectRef.current = null;
+        }
       };
-
-      // Create or get draft project
-      let draftProjectId = currentProjectId;
-      if (!draftProjectId) {
-        // Create a draft project
-        const project = await apiRequest<{ id: string }>('/api/projects', {
-          method: 'POST',
-          body: JSON.stringify({
-            name: projectName || 'Draft',
-            category,
-            prompt: prompt.trim() || 'Draft project',
-            duration: duration || 15,
-            style,
-            mood,
-            aspectRatio,
-            colorPalette,
-            pacing,
-            videoModelId,
-            imageModelId,
-            useReferenceFrame,
-            mode: 'classic',
-          }),
-        }, token);
-        draftProjectId = project.id;
-        setCurrentProjectId(project.id);
-      }
-
-      // Save draft to S3
-      await apiRequest(`/api/projects/${draftProjectId}/draft`, {
-        method: 'POST',
-        body: JSON.stringify(draft),
-      }, token);
-
-      alert('Draft saved successfully to S3!');
-    } catch (error: any) {
-      console.error('Error saving draft:', error);
-      alert(`Failed to save draft: ${error.message || 'Unknown error'}`);
+    } else {
+      // Clear assets when starting new project (no projectId in URL)
+      setGeneratedAnchorImages([]);
+      setCurrentProjectId(null);
+      isLoadingProjectRef.current = null;
     }
-  };
+  }, [projectIdFromUrl]); // Only depend on projectIdFromUrl to prevent duplicate calls
 
-  // Load draft from S3
-  const loadDraft = async () => {
+  const loadProjectData = async (projectId: string) => {
     try {
       const token = await getAccessToken();
-      if (!token) {
-        alert('Please log in to load drafts.');
-        return;
-      }
+      if (!token) return;
 
-      const projects = await apiRequest<Array<{
-        id: string;
-        name?: string;
-        category: string;
-        prompt: string;
-        status: string;
-        created_at?: string;
-        config?: any;
-      }>>('/api/projects', { method: 'GET' }, token);
+      // Set current project ID FIRST to prevent ensureProjectExists from creating a new project
+      setCurrentProjectId(projectId);
+
+      const project = await apiRequest<any>(`/api/projects/${projectId}`, { method: 'GET' }, token);
       
-      // Find projects that might have drafts (draft status or recent projects)
-      const draftProjects = projects.filter(p => p.status === 'draft' || p.status === 'pending');
-      if (draftProjects.length === 0) {
-        alert('No draft projects found. Create a project first and save it as a draft.');
-        return;
+      // Load final video URL from database (preferred) or config
+      if (project.final_video_url) {
+        setFinalVideoUrl(project.final_video_url);
+      } else if (project.config?.finalVideoUrl) {
+        setFinalVideoUrl(project.config.finalVideoUrl);
+      } else if (project.config?.videoUrl) {
+        setFinalVideoUrl(project.config.videoUrl);
+      } else {
+        setFinalVideoUrl(null);
       }
       
-      // Get the most recent draft project
-      const latestDraftProject = draftProjects.sort((a, b) => {
-        const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
-        const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
-        return dateB - dateA;
-      })[0];
+      // Load project data into form
+      // Always set project name from database if it exists (don't let auto-generation overwrite it)
+      if (project.name && project.name.trim()) {
+        setProjectName(project.name);
+        console.log(`[FRONTEND] Loaded project name from database: ${project.name}`);
+      }
+      if (project.prompt) setPrompt(project.prompt);
+      if (project.category) setCategory(project.category as "music_video" | "ad_creative" | "explainer");
       
-      // Try to load draft from S3
-      try {
-        const draftData = await apiRequest<any>(`/api/projects/${latestDraftProject.id}/draft`, {
-          method: 'GET',
-        }, token);
-        
-        // Load the draft data
-        if (draftData.projectName) setProjectName(draftData.projectName);
-        if (draftData.category) setCategory(draftData.category as typeof category);
-        if (draftData.prompt) setPrompt(draftData.prompt);
-        if (draftData.style) setStyle(draftData.style);
-        if (draftData.mood) setMood(draftData.mood);
-        if (draftData.aspectRatio) setAspectRatio(draftData.aspectRatio);
-        if (draftData.duration) setDuration(draftData.duration);
-        if (draftData.colorPalette) setColorPalette(draftData.colorPalette);
-        if (draftData.pacing) setPacing(draftData.pacing);
-        if (draftData.videoModelId) setVideoModelId(draftData.videoModelId);
-        if (draftData.imageModelId) setImageModelId(draftData.imageModelId);
-        
-        setCurrentProjectId(latestDraftProject.id);
-        alert('Draft loaded successfully from S3!');
-      } catch (draftError: any) {
-        // If draft not found in S3, try to load from project data
-        console.warn('Draft not found in S3, loading from project data:', draftError);
-        
-        // Load from project data as fallback
-        if (latestDraftProject.name) setProjectName(latestDraftProject.name);
-        if (latestDraftProject.category) setCategory(latestDraftProject.category as typeof category);
-        if (latestDraftProject.prompt) setPrompt(latestDraftProject.prompt);
-        
-        // Load config if available
-        if (latestDraftProject.config) {
-          const config = typeof latestDraftProject.config === 'string' 
-          ? JSON.parse(latestDraftProject.config) 
-          : latestDraftProject.config;
-        
+      // Load assets from database first (preferred method)
+      const assetPromptsFromMetadata = await loadProjectAssets(projectId);
+      
+      // Load config
+      if (project.config) {
+        const config = project.config;
         if (config.style) setStyle(config.style);
         if (config.mood) setMood(config.mood);
         if (config.aspectRatio) setAspectRatio(config.aspectRatio);
@@ -495,39 +513,515 @@ function SimpleCreateContent() {
         if (config.videoModelId) setVideoModelId(config.videoModelId);
         if (config.imageModelId) setImageModelId(config.imageModelId);
         if (config.useReferenceFrame !== undefined) setUseReferenceFrame(config.useReferenceFrame);
+        if (config.continuous !== undefined) setContinuous(config.continuous);
+        
+        // Load music prompt from config
+        if (config.musicPrompt) setMusicPrompt(config.musicPrompt);
+        if (config.musicUrl) setGeneratedMusicUrl(config.musicUrl);
+        
+        // Load saved asset prompts from config (similar to scene prompts)
+        // Priority: config prompts > asset metadata prompts > empty
+        if (config.anchorImagePrompts && Array.isArray(config.anchorImagePrompts) && config.anchorImagePrompts.length > 0) {
+          // Always use saved prompts from config (user's latest input) - highest priority
+          const savedPrompts = [...config.anchorImagePrompts];
+          // Ensure we have enough slots (pad with empty strings if needed)
+          while (savedPrompts.length < MAX_ANCHOR_ASSETS) {
+            savedPrompts.push('');
+          }
+          // Set the prompts, prioritizing saved ones
+          setAnchorImagePrompts(savedPrompts.slice(0, MAX_ANCHOR_ASSETS));
+          const nonEmptyCount = savedPrompts.filter(p => p && p.trim()).length;
+          console.log(`[FRONTEND] Loaded ${nonEmptyCount} asset prompt(s) from config (total slots: ${savedPrompts.length})`);
+          // Ensure asset 1 (index 0) is expanded by default
+          setExpandedAssetIndex(0);
+        } else if (assetPromptsFromMetadata && assetPromptsFromMetadata.some(p => p && p.trim())) {
+          // If no saved prompts in config, use prompts from asset metadata
+          setAnchorImagePrompts(assetPromptsFromMetadata);
+          const nonEmptyCount = assetPromptsFromMetadata.filter(p => p && p.trim()).length;
+          console.log(`[FRONTEND] Loaded ${nonEmptyCount} asset prompt(s) from asset metadata (total slots: ${assetPromptsFromMetadata.length})`);
+          // Ensure asset 1 (index 0) is expanded by default
+          setExpandedAssetIndex(0);
+        } else {
+          // If no prompts anywhere, ensure we have at least one empty slot
+          setAnchorImagePrompts(['']);
+          console.log(`[FRONTEND] No asset prompts found, initialized with empty slot`);
+          // Ensure asset 1 (index 0) is expanded by default
+          setExpandedAssetIndex(0);
         }
         
-        setCurrentProjectId(latestDraftProject.id);
-        alert(`Draft "${latestDraftProject.name || 'Untitled'}" loaded successfully from project data!`);
+        // Note: Scene prompts from config will be merged AFTER loading scenes from database
+        // This is handled in the scenes loading section below
+        
+        // Fallback: Load anchor images from config if no assets in database
+        // (for backward compatibility with old projects)
+        const currentAssets = generatedAnchorImages;
+        if (currentAssets.length === 0) {
+        if (config.reference_images && Array.isArray(config.reference_images)) {
+            const anchorImages: AnchorImage[] = config.reference_images.slice(0, MAX_ANCHOR_ASSETS).map((url: string, index: number) => ({
+              id: `legacy-anchor-${Date.now()}-${index}`,
+              url,
+            prompt: `Reference image ${index + 1}`,
+              assetNumber: index + 1,
+              isTemporary: true,
+          }));
+            setGeneratedAnchorImages(renumberAnchorImages(anchorImages));
+        } else if (config.referenceImages && Array.isArray(config.referenceImages)) {
+          // Try alternative key name
+            const anchorImages: AnchorImage[] = config.referenceImages.slice(0, MAX_ANCHOR_ASSETS).map((url: string, index: number) => ({
+              id: `legacy-anchor-${Date.now()}-${index}`,
+              url,
+            prompt: `Reference image ${index + 1}`,
+              assetNumber: index + 1,
+              isTemporary: true,
+          }));
+            setGeneratedAnchorImages(renumberAnchorImages(anchorImages));
+          }
+        }
+        
+        // Load scenes from database (preferred method)
+        try {
+          console.log(`[FRONTEND] Loading scenes for project ${projectId}`);
+          const scenesData = await apiRequest<any[]>(`/api/projects/${projectId}/scenes`, { method: 'GET' }, token);
+          console.log(`[FRONTEND] Received scenes data:`, scenesData);
+          
+          if (scenesData && scenesData.length > 0) {
+            // Map database scenes to frontend Scene format
+            const loadedScenes: Scene[] = scenesData.map((scene: any) => {
+              console.log(`[FRONTEND] Mapping scene ${scene.sceneNumber}:`, {
+                id: scene.id,
+                prompt: scene.prompt,
+                hasVideoUrl: !!scene.videoUrl,
+                videoUrl: scene.videoUrl ? scene.videoUrl.substring(0, 100) + '...' : null,
+                hasFirstFrame: !!scene.firstFrameUrl,
+                hasLastFrame: !!scene.lastFrameUrl,
+              });
+              
+              return {
+                id: scene.id || `scene-${scene.sceneNumber}`,
+                prompt: scene.prompt || '',
+                videoUrl: scene.videoUrl,
+                firstFrameUrl: scene.firstFrameUrl,
+                lastFrameUrl: scene.lastFrameUrl,
+                extendPrevious: false, // Default to false - user can change it via checkbox
+                selectedAssetIds: [],
+                isGenerating: false,
+              };
+            });
+            
+            // Merge with saved scene prompts from config (preserve video URLs but update prompts)
+            if (config.scenePrompts && Array.isArray(config.scenePrompts) && config.scenePrompts.length > 0) {
+              const mergedScenes = loadedScenes.map((scene, index) => {
+                const savedPrompt = config.scenePrompts.find((sp: { id?: string; prompt?: string }) => sp.id === scene.id) || config.scenePrompts[index];
+                if (savedPrompt && savedPrompt.prompt) {
+                  return {
+                    ...scene,
+                    prompt: savedPrompt.prompt, // Use saved prompt (user's latest input)
+                    selectedAssetIds: savedPrompt.selectedAssetIds || scene.selectedAssetIds,
+                    extendPrevious: savedPrompt.extendPrevious !== undefined ? savedPrompt.extendPrevious : scene.extendPrevious,
+                  };
+                }
+                return scene;
+              });
+              setScenes(mergedScenes);
+              console.log(`[FRONTEND] Loaded ${mergedScenes.length} scenes from database and merged with saved prompts, ${mergedScenes.filter(s => s.videoUrl).length} with videos`);
+            } else {
+              setScenes(loadedScenes);
+              console.log(`[FRONTEND] Loaded ${loadedScenes.length} scenes from database, ${loadedScenes.filter(s => s.videoUrl).length} with videos`);
+            }
+          } else {
+            console.log(`[FRONTEND] No scenes found in database for project ${projectId}`);
+            // Fallback: Load scenes from config if database has none
+            if (config.scenePrompts && Array.isArray(config.scenePrompts) && config.scenePrompts.length > 0) {
+              // Use saved scene prompts from config
+              const loadedScenes: Scene[] = config.scenePrompts.map((sp: { id?: string; prompt?: string; selectedAssetIds?: string[]; extendPrevious?: boolean }) => ({
+                id: sp.id || `scene-${Date.now()}-${Math.random()}`,
+                prompt: sp.prompt || '',
+                extendPrevious: sp.extendPrevious || false,
+                selectedAssetIds: sp.selectedAssetIds || [],
+                isGenerating: false,
+                // Try to get video URLs from config.sceneUrls if available
+                videoUrl: config.sceneUrls?.[config.scenePrompts.indexOf(sp)],
+                firstFrameUrl: config.frameUrls?.[config.scenePrompts.indexOf(sp)]?.first,
+                lastFrameUrl: config.frameUrls?.[config.scenePrompts.indexOf(sp)]?.last,
+              }));
+              setScenes(loadedScenes);
+              console.log(`[FRONTEND] Loaded ${loadedScenes.length} scenes from config (scenePrompts)`);
+            } else if (config.sceneUrls && Array.isArray(config.sceneUrls) && config.sceneUrls.length > 0) {
+              const loadedScenes: Scene[] = config.sceneUrls.map((url: string, index: number) => ({
+                id: `scene-${index + 1}`,
+                prompt: config.script?.scenes?.[index]?.prompt || `Scene ${index + 1}`,
+                videoUrl: url,
+                firstFrameUrl: config.frameUrls?.[index]?.first,
+                lastFrameUrl: config.frameUrls?.[index]?.last,
+                extendPrevious: index > 0,
+                selectedAssetIds: [],
+                isGenerating: false,
+              }));
+              setScenes(loadedScenes);
+            } else if (config.script?.scenes && Array.isArray(config.script.scenes)) {
+              // Load scenes from script
+              const loadedScenes: Scene[] = config.script.scenes.map((scene: any, index: number) => ({
+                id: `scene-${index + 1}`,
+                prompt: scene.prompt || '',
+                videoUrl: config.sceneUrls?.[index],
+                firstFrameUrl: config.frameUrls?.[index]?.first,
+                lastFrameUrl: config.frameUrls?.[index]?.last,
+                extendPrevious: index > 0,
+                selectedAssetIds: [],
+                isGenerating: false,
+              }));
+              setScenes(loadedScenes);
+            }
+          }
+        } catch (scenesError) {
+          console.error('Error loading scenes from database:', scenesError);
+          // Fallback to config-based loading on error
+          if (config.scenePrompts && Array.isArray(config.scenePrompts) && config.scenePrompts.length > 0) {
+            const loadedScenes: Scene[] = config.scenePrompts.map((sp: { id?: string; prompt?: string; selectedAssetIds?: string[]; extendPrevious?: boolean }) => ({
+              id: sp.id || `scene-${Date.now()}-${Math.random()}`,
+              prompt: sp.prompt || '',
+              extendPrevious: sp.extendPrevious || false,
+              selectedAssetIds: sp.selectedAssetIds || [],
+              isGenerating: false,
+            }));
+            setScenes(loadedScenes);
+          } else if (config.sceneUrls && Array.isArray(config.sceneUrls) && config.sceneUrls.length > 0) {
+            const loadedScenes: Scene[] = config.sceneUrls.map((url: string, index: number) => ({
+              id: `scene-${index + 1}`,
+              prompt: config.script?.scenes?.[index]?.prompt || `Scene ${index + 1}`,
+              videoUrl: url,
+              firstFrameUrl: config.frameUrls?.[index]?.first,
+              lastFrameUrl: config.frameUrls?.[index]?.last,
+              extendPrevious: index > 0,
+              selectedAssetIds: [],
+              isGenerating: false,
+            }));
+            setScenes(loadedScenes);
+          }
+        }
       }
     } catch (error: any) {
-      console.error('Error loading draft:', error);
-      alert(error.message || 'Failed to load draft from database.');
+      console.error('Error loading project data:', error);
+      alert(`Failed to load project: ${error.message || 'Unknown error'}`);
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!prompt.trim()) return;
-    
-    // Use user-entered name or generate one
-    let previewName = projectName.trim();
-    if (!previewName) {
-      try {
-        const token = await getAccessToken();
-        previewName = await generateProjectName(prompt.trim(), category, token);
-        setProjectNamePreview(previewName);
-      } catch (error) {
-        // If name generation fails, use fallback
-        previewName = prompt.trim().substring(0, 50) || 'Untitled Project';
-        setProjectNamePreview(previewName);
-      }
-    } else {
-      setProjectNamePreview(previewName);
+  useEffect(() => {
+    // Only auto-generate project name if we don't have a projectIdFromUrl (new project)
+    // AND we don't already have a project name set
+    // If we're loading an existing project, the name will be set in loadProjectData
+    // IMPORTANT: Never auto-generate name if we have a projectIdFromUrl (loading existing project)
+    if (!projectIdFromUrl && !projectName.trim()) {
+      getAutoProjectName().then(name => {
+        // Only set if still no name and still no projectIdFromUrl (user might have navigated to a project)
+        if (!projectIdFromUrl && !projectName.trim()) {
+          setProjectName(name);
+        }
+      });
     }
     
-    // Show confirmation modal instead of creating immediately
-    setShowConfirmationModal(true);
+    // Clear assets when starting a new project (no projectId in URL)
+    // Assets should only be loaded from project config, not localStorage
+    if (!projectIdFromUrl) {
+      setGeneratedAnchorImages([]);
+    }
+  }, [projectIdFromUrl]); // Only depend on projectIdFromUrl - don't re-run when projectName changes
+
+  // Note: Assets are loaded in loadProjectData, so we don't need a separate useEffect here
+  // This was causing double-loading and potential race conditions
+  // useEffect(() => {
+  //   if (currentProjectId) {
+  //     loadProjectAssets(currentProjectId);
+  //   }
+  // }, [currentProjectId, loadProjectAssets]);
+
+  // Auto-save function to save prompts and settings to project config
+  const autoSaveProject = useCallback(async () => {
+    if (!currentProjectId) {
+      return; // No project to save to yet
+    }
+
+    try {
+      setIsAutoSaving(true);
+      const token = await getAccessToken();
+      if (!token) {
+        return;
+      }
+
+      // Prepare config with asset prompts and scene prompts
+      const configToSave: any = {
+        anchorImagePrompts: anchorImagePrompts.filter(p => p.trim().length > 0),
+        scenePrompts: scenes.map(scene => ({
+          id: scene.id,
+          prompt: scene.prompt,
+          selectedAssetIds: scene.selectedAssetIds,
+          extendPrevious: scene.extendPrevious,
+        })),
+        // Also save current settings
+        style,
+        mood,
+        aspectRatio,
+        duration,
+        colorPalette,
+        pacing,
+        videoModelId,
+        imageModelId,
+        useReferenceFrame,
+        continuous,
+        musicPrompt,
+      };
+
+      // Update project config via PATCH
+      await apiRequest(`/api/projects/${currentProjectId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          config: configToSave,
+        }),
+      }, token);
+
+      console.log('[AUTO-SAVE] Project prompts and settings saved');
+    } catch (error) {
+      console.error('[AUTO-SAVE] Failed to save project:', error);
+      // Don't show error to user - auto-save should be silent
+    } finally {
+      setIsAutoSaving(false);
+    }
+  }, [currentProjectId, anchorImagePrompts, scenes, style, mood, aspectRatio, duration, colorPalette, pacing, videoModelId, imageModelId, useReferenceFrame, continuous, musicPrompt, getAccessToken]);
+
+  // Auto-save asset prompts after 2 seconds of inactivity
+  useEffect(() => {
+    if (!currentProjectId) {
+      return;
+    }
+
+    // Clear existing timer
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+
+    // Set new timer
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveProject();
+    }, 2000); // 2 seconds debounce
+
+    // Cleanup on unmount or when dependencies change
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, [anchorImagePrompts, scenes, currentProjectId, autoSaveProject]);
+
+  // Auto-save project settings after 2 seconds of inactivity
+  useEffect(() => {
+    if (!currentProjectId) {
+      return;
+    }
+
+    // Clear existing timer
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+
+    // Set new timer
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveProject();
+    }, 2000); // 2 seconds debounce
+
+    // Cleanup on unmount or when dependencies change
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, [style, mood, aspectRatio, duration, colorPalette, pacing, videoModelId, imageModelId, useReferenceFrame, continuous, currentProjectId, autoSaveProject]);
+
+  // Ensure a project exists - create one if needed
+  const ensureProjectExists = useCallback(async (): Promise<string | null> => {
+    // If we have a project ID from URL, ALWAYS use it (don't create a new project)
+    // This prevents creating duplicate projects when opening from drafts
+    if (projectIdFromUrl) {
+      setCurrentProjectId(projectIdFromUrl);
+      return projectIdFromUrl;
+    }
+
+    // If we already have a current project ID, use it
+    if (currentProjectId) {
+      return currentProjectId;
+    }
+
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        return null;
+      }
+
+      // Generate project name if needed
+      let finalProjectName = projectName.trim();
+      if (!finalProjectName) {
+        finalProjectName = await generateProjectName((prompt || '').trim(), category, token);
+      }
+
+      // Create project
+      const project = await apiRequest<{ id: string; name?: string }>('/api/projects', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: finalProjectName,
+          category,
+          prompt: prompt.trim() || 'New project',
+          duration,
+          style,
+          mood,
+          aspectRatio,
+          colorPalette,
+          pacing,
+          videoModelId,
+          imageModelId,
+          useReferenceFrame,
+          continuous,
+          mode: 'classic',
+        }),
+      }, token);
+
+      setCurrentProjectId(project.id);
+      if (project.name) {
+        setProjectName(project.name);
+      } else if (!projectName.trim()) {
+        setProjectName(finalProjectName);
+      }
+
+      // Update URL to include project ID so it persists on refresh
+      navigate(`/create?projectId=${project.id}`, { replace: true });
+
+      return project.id;
+    } catch (error) {
+      console.error('Failed to create project:', error);
+      return null;
+    }
+  }, [currentProjectId, projectName, prompt, category, duration, style, mood, aspectRatio, colorPalette, pacing, videoModelId, imageModelId, useReferenceFrame, continuous, getAccessToken]);
+
+  const handleReorderAssets = useCallback((fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
+    
+    // Reorder both prompts and images
+    setAnchorImagePrompts(prev => {
+      const newPrompts = [...prev];
+      const [movedPrompt] = newPrompts.splice(fromIndex, 1);
+      newPrompts.splice(toIndex, 0, movedPrompt);
+      return newPrompts;
+    });
+    
+    setGeneratedAnchorImages(prev => {
+      const newImages = [...prev];
+      // Find assets by their position (assetNumber - 1)
+      const fromAsset = newImages.find(img => img.assetNumber === fromIndex + 1);
+      const toAsset = newImages.find(img => img.assetNumber === toIndex + 1);
+      
+      if (fromAsset && toAsset) {
+        // Swap asset numbers
+        const tempNumber = fromAsset.assetNumber;
+        fromAsset.assetNumber = toAsset.assetNumber;
+        toAsset.assetNumber = tempNumber;
+      } else if (fromAsset) {
+        // Move fromAsset to toIndex position
+        fromAsset.assetNumber = toIndex + 1;
+      } else if (toAsset) {
+        // Move toAsset to fromIndex position
+        toAsset.assetNumber = fromIndex + 1;
+      }
+      
+      // Renumber all assets to ensure sequential order
+      return renumberAnchorImages(newImages);
+    });
+    
+    // Update expanded index if needed
+    if (expandedAssetIndex === fromIndex) {
+      setExpandedAssetIndex(toIndex);
+    } else if (expandedAssetIndex === toIndex) {
+      setExpandedAssetIndex(fromIndex);
+    }
+  }, [expandedAssetIndex]);
+
+  const handleRemoveAnchorImage = useCallback(async (image: AnchorImage) => {
+    // Remove deleted asset ID from all scene selections
+    setScenes(prev => prev.map(scene => ({
+      ...scene,
+      selectedAssetIds: scene.selectedAssetIds.filter(id => id !== image.id),
+    })));
+
+    // Optimistically update UI - filter out deleted asset
+    const filteredImages = generatedAnchorImages.filter(img => img.id !== image.id);
+    // Renumber remaining assets sequentially (Asset 2 becomes Asset 1, Asset 3 becomes Asset 2, etc.)
+    const updatedImages = renumberAnchorImages(filteredImages);
+    setGeneratedAnchorImages(updatedImages);
+
+    if (!currentProjectId || !image.assetId) {
+      // If no project or assetId, just update UI (temporary asset)
+      return;
+    }
+
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        return;
+      }
+      
+      // Delete from database and S3
+      await apiRequest(`/api/assets/${image.assetId}`, { method: 'DELETE' }, token);
+      
+      // Reload assets from database to ensure proper renumbering and sync with database
+      // This ensures Asset 2 becomes Asset 1, Asset 3 becomes Asset 2, etc. based on created_at order
+      await loadProjectAssets(currentProjectId);
+    } catch (error) {
+      console.error('Failed to delete asset:', error);
+      // Reload assets even on error to sync with database state
+      if (currentProjectId) {
+        await loadProjectAssets(currentProjectId);
+      }
+    }
+  }, [currentProjectId, getAccessToken, loadProjectAssets, generatedAnchorImages]);
+
+  // Handle project name editing
+  const startEditingProjectName = () => {
+    setTempProjectName(projectName);
+    setIsEditingProjectName(true);
+  };
+
+  const saveProjectName = async () => {
+    const trimmed = tempProjectName.trim();
+    let nameToSave = trimmed;
+    
+    if (!nameToSave) {
+      const autoName = await getAutoProjectName();
+      nameToSave = autoName;
+    }
+    
+    setProjectName(nameToSave);
+    setIsEditingProjectName(false);
+    
+    // Save to database if we have a project ID
+    if (currentProjectId) {
+      try {
+        const token = await getAccessToken();
+        if (token) {
+          await apiRequest(`/api/projects/${currentProjectId}`, {
+            method: 'PATCH',
+            body: JSON.stringify({
+              name: nameToSave,
+            }),
+          }, token);
+          console.log(`[FRONTEND] Project name saved to database: ${nameToSave}`);
+        }
+      } catch (error: any) {
+        console.error('Error saving project name:', error);
+        // Don't show alert - name is saved locally, just failed to sync to DB
+      }
+    }
+  };
+
+  const cancelEditingProjectName = () => {
+    setTempProjectName("");
+    setIsEditingProjectName(false);
   };
 
   // Calculate expected scene count based on duration
@@ -578,11 +1072,16 @@ function SimpleCreateContent() {
     
     try {
       const token = await getAccessToken();
+      if (!token) {
+        setGenerationError('Authentication required. Please log in.');
+        setIsGeneratingScript(false);
+        return;
+      }
       
       // Use user-entered name or generate one
       let finalProjectName = projectName.trim();
       if (!finalProjectName) {
-        finalProjectName = await generateProjectName(prompt.trim(), category, token);
+        finalProjectName = await generateProjectName((prompt || '').trim(), category, token);
       }
       setProjectNamePreview(finalProjectName);
       
@@ -701,13 +1200,19 @@ function SimpleCreateContent() {
     
     try {
       const token = await getAccessToken();
+      if (!token) {
+        setGenerationError('Authentication required. Please log in.');
+        setIsProcessing(false);
+        setIsCreating(false);
+        return;
+      }
       
       // If no project exists yet, create one first
       let projectIdToUse = currentProjectId;
       if (!projectIdToUse) {
         let finalProjectName = projectName.trim();
         if (!finalProjectName) {
-          finalProjectName = await generateProjectName(prompt.trim(), category, token);
+          finalProjectName = await generateProjectName((prompt || '').trim(), category, token);
         }
         setProjectNamePreview(finalProjectName);
         
@@ -764,7 +1269,7 @@ function SimpleCreateContent() {
         }
       }
       
-      // Update project with the final prompt and current model selection
+      // Update project with the final prompt, full script, and current model selection
       if (projectIdToUse) {
         const updateData: any = {};
         if (finalPrompt) {
@@ -774,6 +1279,38 @@ function SimpleCreateContent() {
         if (videoModelId) {
           updateData.videoModelId = videoModelId;
         }
+        
+        // CRITICAL: Save the full script JSON to config.script so it can be used during video generation
+        // The script contains detailed scene prompts (1000+ chars each) that must be used
+        const scriptToSave = editedScript && editedScript.trim() ? editedScript : generatedScript;
+        if (scriptToSave && scriptToSave.trim()) {
+          // Get current project config to merge with
+          const currentProject = await apiRequest<{ config?: any }>(
+            `/api/projects/${projectIdToUse}`,
+            { method: 'GET' },
+            token
+          );
+          
+          const currentConfig = currentProject.config || {};
+          // Save the full script JSON to config.script
+          // This ensures the detailed scene prompts (1000+ chars each) are available for video generation
+          currentConfig.script = scriptToSave;
+          // Save anchor images (reference_images) for Veo 3.1
+          if (generatedAnchorImages.length > 0) {
+            currentConfig.referenceImages = generatedAnchorImages.map(img => img.url);
+            console.log('Saving reference images to config:', {
+              count: generatedAnchorImages.length,
+              urls: generatedAnchorImages.map(img => img.url.substring(0, 100) + '...'),
+            });
+          }
+          updateData.config = currentConfig;
+          
+          console.log('Saving full script to config.script:', {
+            scriptLength: scriptToSave.length,
+            scriptPreview: scriptToSave.substring(0, 200) + '...',
+          });
+        }
+        
         if (Object.keys(updateData).length > 0) {
           await apiRequest(`/api/projects/${projectIdToUse}`, {
             method: 'PATCH',
@@ -809,12 +1346,14 @@ function SimpleCreateContent() {
             method: 'POST',
             body: JSON.stringify({
               useReferenceFrame,
+              continuous,
               videoModelId,
               aspectRatio,
               style,
               mood,
               colorPalette,
               pacing,
+              referenceImages: generatedAnchorImages.map(img => img.url), // Pass anchor images as reference_images
             }),
           },
           token
@@ -933,6 +1472,733 @@ function SimpleCreateContent() {
     setEditedScript('');
   };
 
+  // Prepare scene modal content
+  const sceneModalContent = (() => {
+    if (!showSceneModal.isOpen) return null;
+    const scene = scenes.find(s => s.id === showSceneModal.sceneId);
+    if (!scene || !scene.videoUrl) return null;
+    
+    const sceneIndex = scenes.findIndex(s => s.id === scene.id);
+    const items = [
+      ...(scene.videoUrl ? [{
+        id: `${scene.id}-video`,
+        type: 'video' as const,
+        url: scene.videoUrl,
+        title: `Scene ${sceneIndex + 1} Video`,
+        description: scene.prompt,
+      }] : []),
+      ...(scene.firstFrameUrl ? [{
+        id: `${scene.id}-first`,
+        type: 'image' as const,
+        url: scene.firstFrameUrl,
+        title: 'First Frame',
+        description: 'First frame of the scene',
+      }] : []),
+      ...(scene.lastFrameUrl ? [{
+        id: `${scene.id}-last`,
+        type: 'image' as const,
+        url: scene.lastFrameUrl,
+        title: 'Last Frame',
+        description: 'Last frame of the scene',
+      }] : []),
+    ];
+    
+    return (
+      <PreviewModal
+        items={items}
+        initialIndex={showSceneModal.currentIndex}
+        isOpen={showSceneModal.isOpen}
+        onClose={() => setShowSceneModal({ sceneId: '', isOpen: false, currentIndex: 0 })}
+      />
+    );
+  })();
+
+  // Handler functions for MiddleSection component
+  const handleAddAssetSlot = useCallback(() => {
+    if (anchorImagePrompts.length >= MAX_ANCHOR_ASSETS) {
+      alert(`Maximum ${MAX_ANCHOR_ASSETS} assets allowed`);
+      return;
+    }
+    setAnchorImagePrompts(prev => [...prev, '']);
+    setExpandedAssetIndex(anchorImagePrompts.length);
+  }, [anchorImagePrompts.length]);
+
+  const handleGenerateAnchorImage = useCallback(async (assetIndex: number) => {
+    const prompt = anchorImagePrompts[assetIndex];
+    if (!prompt.trim()) {
+      alert('Please enter a description for the asset');
+      return;
+    }
+
+    // Check if this slot already has an asset
+    const existingAsset = generatedAnchorImages.find(img => img.assetNumber === assetIndex + 1);
+    if (existingAsset && !confirm(`Asset ${assetIndex + 1} already exists. Replace it?`)) {
+      return;
+    }
+
+    try {
+      // Set this specific asset as generating
+      setIsGeneratingAssets(prev => {
+        const newState = [...prev];
+        while (newState.length <= assetIndex) {
+          newState.push(false);
+        }
+        newState[assetIndex] = true;
+        return newState;
+      });
+
+      const token = await getAccessToken();
+      if (!token) {
+        alert('Authentication required. Please log in.');
+        return;
+      }
+
+      // Ensure project exists before generating asset (creates one if needed)
+      const projectId = await ensureProjectExists();
+      if (!projectId) {
+        alert('Failed to create project. Please try again.');
+        return;
+      }
+
+      // Generate image - will be saved to S3 and database automatically
+      const result = await apiRequest<{ imageUrl: string; isTemporary?: boolean; message?: string; assetId?: string | null }>('/api/generate-image', {
+        method: 'POST',
+        body: JSON.stringify({
+          prompt: prompt,
+          imageModelId,
+          aspectRatio,
+          projectId: projectId, // Always provide projectId so asset is saved
+        }),
+      }, token);
+
+      if (result?.imageUrl) {
+        const newImage: AnchorImage = {
+          id: result.assetId || `anchor-${Date.now()}-${assetIndex}`,
+          assetId: result.assetId || undefined,
+          url: result.imageUrl,
+          prompt: prompt,
+          assetNumber: assetIndex + 1,
+          isTemporary: Boolean(result.isTemporary),
+        };
+
+        // Replace existing asset or add new one
+        setGeneratedAnchorImages(prev => {
+          const filtered = prev.filter(img => img.assetNumber !== assetIndex + 1);
+          return renumberAnchorImages([...filtered, newImage]);
+        });
+
+        // Clear the prompt for this asset
+        setAnchorImagePrompts(currentPrompts => {
+          const newPrompts = [...currentPrompts];
+          newPrompts[assetIndex] = '';
+          return newPrompts;
+        });
+
+        // Collapse the text box and move to next if available
+        if (assetIndex < anchorImagePrompts.length - 1) {
+          setExpandedAssetIndex(assetIndex + 1);
+        } else {
+          setExpandedAssetIndex(null);
+        }
+
+        // Reload assets from database to ensure sync
+        if (result.assetId) {
+          await loadProjectAssets(projectId);
+        } else {
+          setTimeout(async () => {
+            await loadProjectAssets(projectId);
+          }, 2000);
+        }
+      }
+    } catch (error: any) {
+      console.error('Error generating anchor image:', error);
+      alert(`Failed to generate image: ${error.message || 'Unknown error'}`);
+    } finally {
+      setIsGeneratingAssets(prev => {
+        const newState = [...prev];
+        while (newState.length <= assetIndex) {
+          newState.push(false);
+        }
+        newState[assetIndex] = false;
+        return newState;
+      });
+    }
+  }, [anchorImagePrompts, imageModelId, aspectRatio, getAccessToken, ensureProjectExists, loadProjectAssets, generatedAnchorImages]);
+
+  const handleGenerateAllAssets = useCallback(async () => {
+    // Find all assets with prompts
+    const assetsToGenerate = anchorImagePrompts
+      .map((prompt, index) => ({ prompt, index }))
+      .filter(({ prompt }) => prompt.trim());
+
+    if (assetsToGenerate.length === 0) {
+      alert('Please enter descriptions for at least one asset');
+      return;
+    }
+
+    try {
+      // Set all assets as generating
+      setIsGeneratingAssets(() => {
+        const newState: boolean[] = [];
+        assetsToGenerate.forEach(({ index }) => {
+          while (newState.length <= index) {
+            newState.push(false);
+          }
+          newState[index] = true;
+        });
+        return newState;
+      });
+
+      const token = await getAccessToken();
+      if (!token) {
+        alert('Authentication required. Please log in.');
+        return;
+      }
+
+      const projectId = await ensureProjectExists();
+      if (!projectId) {
+        alert('Failed to create project. Please try again.');
+        return;
+      }
+
+      // Generate all assets in parallel FIRST (before deleting old ones)
+      const generationPromises = assetsToGenerate.map(async ({ prompt, index }) => {
+        try {
+          const result = await apiRequest<{ imageUrl: string; isTemporary?: boolean; message?: string; assetId?: string | null }>('/api/generate-image', {
+            method: 'POST',
+            body: JSON.stringify({
+              prompt: prompt.trim(),
+              imageModelId,
+              aspectRatio,
+              projectId: projectId,
+            }),
+          }, token);
+
+          if (result?.imageUrl) {
+            return {
+              index,
+              result,
+              prompt,
+            };
+          }
+          return null;
+        } catch (error: any) {
+          console.error(`Error generating asset ${index + 1}:`, error);
+          return { index, error: error.message || 'Unknown error' };
+        }
+      });
+
+      const results = await Promise.all(generationPromises);
+
+      // Process results
+      const newImages: AnchorImage[] = [];
+      const errors: Array<{ index: number; error: string }> = [];
+
+      results.forEach((result) => {
+        if (!result) return;
+        if ('error' in result) {
+          errors.push({ index: result.index, error: result.error });
+        } else {
+          const newImage: AnchorImage = {
+            id: result.result.assetId || `anchor-${Date.now()}-${result.index}`,
+            assetId: result.result.assetId || undefined,
+            url: result.result.imageUrl,
+            prompt: result.prompt,
+            assetNumber: result.index + 1,
+            isTemporary: Boolean(result.result.isTemporary),
+          };
+          newImages.push(newImage);
+        }
+      });
+
+      // Only delete old assets AFTER new ones are successfully generated
+      // Delete only the assets that were successfully replaced
+      if (newImages.length > 0) {
+        const assetNumbersToReplace = new Set(newImages.map(img => img.assetNumber));
+        const assetsToDelete = generatedAnchorImages.filter(img => 
+          assetNumbersToReplace.has(img.assetNumber) && img.assetId
+        );
+
+        if (assetsToDelete.length > 0) {
+          console.log(`[GENERATE ALL] Deleting ${assetsToDelete.length} old asset(s) after successful generation`);
+          const deletePromises = assetsToDelete.map(async (asset) => {
+            if (asset.assetId) {
+              try {
+                await apiRequest(`/api/assets/${asset.assetId}`, { method: 'DELETE' }, token);
+                console.log(`[GENERATE ALL] Deleted old asset ${asset.assetId} from database and S3`);
+              } catch (error) {
+                console.error(`[GENERATE ALL] Failed to delete old asset ${asset.assetId}:`, error);
+                // Continue even if deletion fails - new asset is already generated
+              }
+            }
+          });
+          await Promise.all(deletePromises);
+        }
+
+        // Update state with new images (replace old ones)
+        setGeneratedAnchorImages(prev => {
+          // Filter out old assets that were replaced and add new ones
+          const filtered = prev.filter(img => !assetNumbersToReplace.has(img.assetNumber));
+          return renumberAnchorImages([...filtered, ...newImages]);
+        });
+
+        // Clear prompts for successfully generated assets
+        setAnchorImagePrompts(prev => {
+          const newPrompts = [...prev];
+          newImages.forEach(img => {
+            newPrompts[img.assetNumber - 1] = '';
+          });
+          return newPrompts;
+        });
+      } else {
+        // No assets were successfully generated - keep old ones untouched
+        console.log(`[GENERATE ALL] No assets were successfully generated. Keeping old assets.`);
+      }
+
+      // Collapse all text boxes
+      setExpandedAssetIndex(null);
+
+      // Show results
+      if (errors.length > 0) {
+        alert(`${newImages.length} asset(s) generated successfully. ${errors.length} failed: ${errors.map(e => `Asset ${e.index + 1}: ${e.error}`).join(', ')}`);
+      } else {
+        alert(`All ${newImages.length} asset(s) generated successfully!`);
+      }
+
+      // Reload assets from database to ensure sync
+      await loadProjectAssets(projectId);
+    } catch (error: any) {
+      console.error('Error generating all assets:', error);
+      alert(`Failed to generate assets: ${error.message || 'Unknown error'}`);
+    } finally {
+      setIsGeneratingAssets([]);
+    }
+  }, [anchorImagePrompts, imageModelId, aspectRatio, getAccessToken, ensureProjectExists, loadProjectAssets, generatedAnchorImages]);
+
+  const handleAnchorImageClick = useCallback((index: number) => {
+    setSelectedAnchorImageIndex(index);
+    setShowAnchorImageModal(true);
+  }, []);
+
+  const handleScenePromptChange = useCallback((sceneId: string, prompt: string) => {
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, prompt } : s));
+  }, []);
+
+  const handleSceneExtendPreviousChange = useCallback((sceneId: string, extend: boolean) => {
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, extendPrevious: extend } : s));
+  }, []);
+
+  const handleSceneSelectedAssetIdsChange = useCallback((sceneId: string, assetIds: string[]) => {
+    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, selectedAssetIds: assetIds } : s));
+  }, []);
+
+  const handleSceneGenerate = useCallback(async (sceneIndex: number, scene: Scene) => {
+    if (!scene.prompt.trim()) {
+      alert('Please enter a prompt for the scene');
+      return;
+    }
+
+    try {
+      // Set scene as generating
+      setScenes(prev => prev.map(s => 
+        s.id === scene.id ? { ...s, isGenerating: true } : s
+      ));
+
+      const token = await getAccessToken();
+      if (!token) {
+        alert('Authentication required. Please log in.');
+        return;
+      }
+
+      // Ensure project exists
+      const projectId = await ensureProjectExists();
+      if (!projectId) {
+        alert('Failed to create project. Please try again.');
+        return;
+      }
+
+      // Get only the selected assets as reference images (multiple URLs)
+      // Filter to only include assets that are checked/selected for this scene
+      // Use current reference images from frontend state, sorted by assetNumber
+      const selectedAssets = generatedAnchorImages
+        .sort((a, b) => a.assetNumber - b.assetNumber)
+        .filter(img => scene.selectedAssetIds.includes(img.id));
+      const referenceImages = selectedAssets.map(img => img.url);
+      
+      // Log which assets are being used
+      console.log('Using reference images for scene generation:', {
+        totalAssets: generatedAnchorImages.length,
+        selectedAssets: scene.selectedAssetIds.length,
+        selectedAssetIds: scene.selectedAssetIds,
+        referenceImageUrls: referenceImages,
+      });
+
+      // Get previous scene's video URL if extendPrevious is enabled
+      let previousSceneVideoUrl: string | undefined;
+      let previousSceneLastFrame: string | undefined;
+      if (sceneIndex > 0) {
+        const previousScene = scenes[sceneIndex - 1];
+        if (scene.extendPrevious) {
+          previousSceneVideoUrl = previousScene.videoUrl;
+          console.log('[FRONTEND] Extend previous enabled, previous scene video URL:', previousSceneVideoUrl ? previousSceneVideoUrl.substring(0, 100) + '...' : 'NOT AVAILABLE');
+        }
+        // For continuous mode, always get the last frame from previous scene
+        if (continuous) {
+          previousSceneLastFrame = previousScene.lastFrameUrl;
+          console.log('[FRONTEND] Continuous mode enabled:', {
+            sceneIndex,
+            continuous,
+            hasPreviousScene: !!previousScene,
+            previousSceneHasLastFrame: !!previousScene.lastFrameUrl,
+            previousSceneLastFrame: previousSceneLastFrame ? previousSceneLastFrame.substring(0, 100) + '...' : 'NOT AVAILABLE',
+            previousSceneVideoUrl: previousScene.videoUrl ? previousScene.videoUrl.substring(0, 100) + '...' : 'NOT AVAILABLE',
+          });
+        }
+      } else {
+        console.log('[FRONTEND] First scene, sceneIndex:', sceneIndex);
+      }
+
+      // Log request payload for debugging
+      const requestPayload = {
+        sceneIndex,
+        prompt: scene.prompt,
+        videoModelId,
+        aspectRatio,
+        style,
+        mood,
+        colorPalette,
+        pacing,
+        referenceImages,
+        previousSceneVideoUrl: previousSceneVideoUrl,
+        previousSceneLastFrame: previousSceneLastFrame,
+        useReferenceFrame: scene.extendPrevious && useReferenceFrame,
+        continuous: continuous,
+      };
+      console.log('[FRONTEND] Sending scene generation request:', {
+        ...requestPayload,
+        previousSceneVideoUrl: previousSceneVideoUrl ? previousSceneVideoUrl.substring(0, 100) + '...' : undefined,
+        previousSceneLastFrame: previousSceneLastFrame ? previousSceneLastFrame.substring(0, 100) + '...' : undefined,
+        referenceImagesCount: referenceImages.length,
+      });
+
+      // Call API to generate single scene
+      const result = await apiRequest<{
+        videoUrl: string;
+        firstFrameUrl?: string;
+        lastFrameUrl?: string;
+      }>(
+        `/api/projects/${projectId}/scenes/generate`,
+        {
+          method: 'POST',
+          body: JSON.stringify(requestPayload),
+        },
+        token
+      );
+
+      // Update scene with generated video
+      setScenes(prev => prev.map(s => 
+        s.id === scene.id ? {
+          ...s,
+          videoUrl: result.videoUrl,
+          firstFrameUrl: result.firstFrameUrl,
+          lastFrameUrl: result.lastFrameUrl,
+          isGenerating: false,
+        } : s
+      ));
+    } catch (error: any) {
+      console.error('Error generating scene:', error);
+      alert(`Failed to generate scene: ${error.message || 'Unknown error'}`);
+      
+      // Set scene as not generating on error
+      setScenes(prev => prev.map(s => 
+        s.id === scene.id ? { ...s, isGenerating: false } : s
+      ));
+    }
+  }, [getAccessToken, ensureProjectExists, generatedAnchorImages, scenes, videoModelId, aspectRatio, style, mood, colorPalette, pacing, useReferenceFrame, continuous]);
+
+  const handleAddScene = useCallback(() => {
+                  setScenes(prev => [...prev, {
+                    id: `scene-${Date.now()}`,
+                    prompt: '',
+                    extendPrevious: false,
+      selectedAssetIds: [],
+                    isGenerating: false,
+                  }]);
+  }, []);
+
+  const handleRemoveScene = useCallback((sceneId: string) => {
+    setScenes(prev => prev.filter(s => s.id !== sceneId));
+  }, []);
+
+  const handleGenerateAll = useCallback(async (forceParallel: boolean = false) => {
+    // Validate all scenes have prompts
+    const scenesWithoutPrompts = scenes.filter(s => !s.prompt.trim());
+    if (scenesWithoutPrompts.length > 0) {
+      alert(`Please enter prompts for all scenes before generating. ${scenesWithoutPrompts.length} scene(s) missing prompts.`);
+      return;
+    }
+
+    setIsGeneratingAll(true);
+    
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        alert('Authentication required. Please log in.');
+        return;
+      }
+
+      // Ensure project exists
+      const projectId = await ensureProjectExists();
+      if (!projectId) {
+        alert('Failed to create project. Please try again.');
+        return;
+      }
+
+      // Set all scenes as generating
+      setScenes(prev => prev.map(s => ({ ...s, isGenerating: true })));
+
+      // Use forceParallel if provided, otherwise use the parallel checkbox state
+      const useParallel = forceParallel || parallel;
+
+      // Call backend endpoint to generate all scenes
+      const result = await apiRequest<{
+        finalVideoUrl: string;
+        sceneUrls: string[];
+        frameUrls: Array<{ first: string; last: string }>;
+      }>(
+        `/api/projects/${projectId}/scenes/generate-all`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            scenes: scenes.map((scene, index) => ({
+              sceneIndex: index + 1, // 1-based indexing (Scene 1, 2, 3, 4, 5)
+              prompt: scene.prompt,
+              selectedAssetIds: scene.selectedAssetIds,
+              extendPrevious: scene.extendPrevious,
+            })),
+            parallel: useParallel,
+            continuous,
+            useReferenceFrame,
+            videoModelId,
+            aspectRatio,
+            style,
+            mood,
+            colorPalette,
+            pacing,
+            // Use current reference images from frontend state, not old saved data
+            // Get all currently generated assets in order (by assetNumber)
+            // Send asset ID to URL mapping so backend can filter reference images per scene
+            assetIdToUrlMap: generatedAnchorImages
+              .sort((a, b) => a.assetNumber - b.assetNumber)
+              .reduce((acc, img) => {
+                acc[img.id] = img.url;
+                return acc;
+              }, {} as Record<string, string>),
+          }),
+        },
+        token
+      );
+
+      // Update all scenes with generated videos
+      setScenes(prev => prev.map((scene, index) => ({
+        ...scene,
+        videoUrl: result.sceneUrls[index],
+        firstFrameUrl: result.frameUrls[index]?.first,
+        lastFrameUrl: result.frameUrls[index]?.last,
+        isGenerating: false,
+      })));
+
+      // Update final video URL
+      if (result.finalVideoUrl) {
+        setFinalVideoUrl(result.finalVideoUrl);
+      }
+
+      // Show success message
+      console.log('All scenes generated successfully! Final stitched video:', result.finalVideoUrl);
+    } catch (error: any) {
+      console.error('Error generating all scenes:', error);
+      alert(`Failed to generate all scenes: ${error.message || 'Unknown error'}`);
+      
+      // Set all scenes as not generating on error
+      setScenes(prev => prev.map(s => ({ ...s, isGenerating: false })));
+    } finally {
+      setIsGeneratingAll(false);
+    }
+  }, [scenes, parallel, continuous, useReferenceFrame, videoModelId, aspectRatio, style, mood, colorPalette, pacing, generatedAnchorImages, getAccessToken, ensureProjectExists]);
+
+  const handleSceneVideoClick = useCallback((sceneId: string) => {
+    setShowSceneModal({ sceneId, isOpen: true, currentIndex: 0 });
+  }, []);
+
+  const handleGenerateMusic = useCallback(async () => {
+    if (!musicPrompt.trim()) {
+      alert('Please enter music input (JSON format)');
+      return;
+    }
+
+    setIsGeneratingMusic(true);
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        alert('Authentication required. Please log in.');
+        return;
+      }
+
+      const projectId = await ensureProjectExists();
+      if (!projectId) {
+        alert('Failed to create project. Please try again.');
+        return;
+      }
+
+      // Parse the input to extract lyrics, prompt, and optional parameters from JSON
+      let extractedLyrics = '';
+      let extractedPrompt = 'Jazz, Smooth Jazz, Romantic, Dreamy';
+      let extractedBitrate = 256000;
+      let extractedSampleRate = 44100;
+      let extractedAudioFormat = 'mp3';
+
+      // Try to parse as JSON
+      try {
+        // Try to find JSON-like structure in the input
+        const jsonMatch = musicPrompt.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const jsonStr = jsonMatch[0];
+          const parsed = JSON.parse(jsonStr);
+          
+          // Extract lyrics (required)
+          if (parsed.lyrics && typeof parsed.lyrics === 'string') {
+            extractedLyrics = parsed.lyrics;
+          }
+          
+          // Extract prompt (required by API, but we'll use default if not provided)
+          if (parsed.prompt && typeof parsed.prompt === 'string') {
+            extractedPrompt = parsed.prompt;
+          }
+          
+          // Extract optional parameters
+          if (parsed.bitrate && typeof parsed.bitrate === 'number') {
+            extractedBitrate = parsed.bitrate;
+          }
+          if (parsed.sample_rate && typeof parsed.sample_rate === 'number') {
+            extractedSampleRate = parsed.sample_rate;
+          }
+          if (parsed.audio_format && typeof parsed.audio_format === 'string') {
+            extractedAudioFormat = parsed.audio_format;
+          }
+          
+          console.log('Parsed JSON from input:', { 
+            hasLyrics: !!parsed.lyrics,
+            hasPrompt: !!parsed.prompt,
+            prompt: extractedPrompt,
+            bitrate: extractedBitrate,
+            sample_rate: extractedSampleRate,
+            audio_format: extractedAudioFormat
+          });
+        } else {
+          throw new Error('No JSON object found in input');
+        }
+      } catch (e) {
+        console.error('Failed to parse JSON:', e);
+        alert('Invalid JSON format. Please paste a valid JSON object with "lyrics" field (and optionally "prompt", "bitrate", "sample_rate", "audio_format").');
+        return;
+      }
+
+      if (!extractedLyrics.trim()) {
+        alert('No lyrics found in JSON. Please include a "lyrics" field.');
+        return;
+      }
+
+      const result = await apiRequest<{ musicUrl: string }>(
+        `/api/projects/${projectId}/generate-music`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            lyrics: extractedLyrics,
+            prompt: extractedPrompt,
+            bitrate: extractedBitrate,
+            sample_rate: extractedSampleRate,
+            audio_format: extractedAudioFormat,
+          }),
+        },
+        token
+      );
+
+      if (result.musicUrl) {
+        setGeneratedMusicUrl(result.musicUrl);
+        console.log('Music generated successfully:', result.musicUrl);
+      }
+    } catch (error: any) {
+      console.error('Error generating music:', error);
+      alert(`Failed to generate music: ${error.message || 'Unknown error'}`);
+    } finally {
+      setIsGeneratingMusic(false);
+    }
+  }, [musicPrompt, getAccessToken, ensureProjectExists]);
+
+  const handleStitchScenes = useCallback(async () => {
+    setIsStitching(true);
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        alert('Authentication required. Please log in.');
+        return;
+      }
+
+      const projectId = await ensureProjectExists();
+      if (!projectId) {
+        alert('Failed to create project. Please try again.');
+        return;
+      }
+
+      // Send music URL if available, otherwise send empty object to satisfy Fastify JSON parser
+      const body: { musicUrl?: string } = {};
+      if (generatedMusicUrl) {
+        body.musicUrl = generatedMusicUrl;
+      }
+
+      const result = await apiRequest<{ success: boolean; videoUrl: string; finalVideoUrl?: string; sceneCount: number; hasMusic: boolean }>(
+        `/api/projects/${projectId}/stitch`,
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+        },
+        token
+      );
+
+      if (result.videoUrl || result.finalVideoUrl) {
+        const finalUrl = result.finalVideoUrl || result.videoUrl;
+        setFinalVideoUrl(finalUrl);
+        
+        // Reload project data from database to ensure final video URL is properly saved
+        try {
+          const project = await apiRequest<any>(`/api/projects/${projectId}`, { method: 'GET' }, token);
+          
+          // Update final video URL from database (ensures it's saved)
+          if (project.final_video_url) {
+            setFinalVideoUrl(project.final_video_url);
+          } else if (project.config?.finalVideoUrl) {
+            setFinalVideoUrl(project.config.finalVideoUrl);
+          } else if (project.config?.videoUrl) {
+            setFinalVideoUrl(project.config.videoUrl);
+          }
+          
+          console.log('Project data reloaded after stitching. Final video URL saved:', project.final_video_url || project.config?.finalVideoUrl);
+        } catch (reloadError) {
+          console.warn('Failed to reload project data after stitching:', reloadError);
+          // Still use the URL from the stitch response
+        }
+        
+        alert(`Successfully stitched ${result.sceneCount} scene(s)${result.hasMusic ? ' with music' : ''}!`);
+        console.log('Scenes stitched successfully:', finalUrl);
+      }
+    } catch (error: any) {
+      console.error('Error stitching scenes:', error);
+      alert(`Failed to stitch scenes: ${error.message || 'Unknown error'}`);
+    } finally {
+      setIsStitching(false);
+    }
+  }, [getAccessToken, ensureProjectExists, generatedMusicUrl]);
+
   return (
     <div className="min-h-screen relative overflow-hidden">
       {/* Animated Textured Background */}
@@ -955,484 +2221,99 @@ function SimpleCreateContent() {
         <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-float" />
         <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-float-delayed" />
         <div className="absolute top-1/2 right-1/3 w-72 h-72 bg-pink-500/10 rounded-full blur-3xl animate-float-slow" />
-      </div>
+        </div>
 
       <Header />
       
       <div className="relative z-10 min-h-[calc(100vh-4rem)] flex">
         {/* Left Panel - Settings */}
-        <div className="w-96 border-r border-white/10 bg-black/20 backdrop-blur-xl p-8 overflow-y-auto animate-slide-in-left flex flex-col">
-          {/* Back to Dashboard Button */}
-          <div className="mb-6 animate-fade-in">
-            <button
-              onClick={() => navigate('/dashboard')}
-              className="flex items-center gap-2 text-white/70 hover:text-white transition-colors group"
-            >
-              <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
-              <span className="text-sm font-medium">Back to Dashboard</span>
-            </button>
-          </div>
+        <LeftPanel
+          category={category}
+          onCategoryChange={handleCategoryChange}
+          style={style}
+          onStyleChange={setStyle}
+          mood={mood}
+          onMoodChange={setMood}
+          aspectRatio={aspectRatio}
+          onAspectRatioChange={setAspectRatio}
+          duration={duration}
+          onDurationChange={setDuration}
+          colorPalette={colorPalette}
+          onColorPaletteChange={setColorPalette}
+          pacing={pacing}
+          onPacingChange={setPacing}
+          videoModelId={videoModelId}
+          onVideoModelIdChange={setVideoModelId}
+          imageModelId={imageModelId}
+          onImageModelIdChange={setImageModelId}
+          useReferenceFrame={useReferenceFrame}
+          onUseReferenceFrameChange={setUseReferenceFrame}
+          styleOptions={styleOptions}
+          moodOptions={moodOptions}
+          aspectRatioOptions={aspectRatioOptions}
+          durationOptions={durationOptions}
+          colorPaletteOptions={colorPaletteOptions}
+          pacingOptions={pacingOptions}
+          videoModelOptions={videoModelOptions}
+          imageModelOptions={imageModelOptions}
+          glassSelectStyle={glassSelectStyle}
+        />
 
-          <div className="space-y-5 flex-1">
-            {/* Category Selection */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.1s' }}>
-              <label className="block text-sm font-medium text-white/70 mb-3 uppercase tracking-wider">
-                Category <span className="text-red-400">*</span>
-              </label>
-              <div className="flex gap-3">
-                {[
-                  { value: "music_video", label: "Music", icon: "🎵" },
-                  { value: "ad_creative", label: "Ad", icon: "📢" },
-                  { value: "explainer", label: "Explain", icon: "📚" },
-                ].map((cat, idx) => (
-                  <button
-                    key={cat.value}
-                    type="button"
-                    onClick={() => handleCategoryChange(cat.value as typeof category)}
-                    className={`flex-1 aspect-square flex flex-col items-center justify-center rounded-lg border transition-all duration-300 transform hover:scale-[1.05] ${
-                      category === cat.value
-                        ? "border-blue-500/50 bg-blue-500/10 shadow-lg shadow-blue-500/20"
-                        : "border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/10"
-                    }`}
-                    style={{ maxWidth: '80px', maxHeight: '80px', animationDelay: `${0.15 + idx * 0.05}s` }}
-                  >
-                    <span className="text-2xl mb-1">{cat.icon}</span>
-                    <span className="text-xs font-medium text-white">{cat.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Visual Style + Mood - Row 1 */}
-            <div className="animate-fade-in flex gap-3" style={{ animationDelay: '0.3s' }}>
-              {/* Visual Style */}
-              <div className="flex-1">
-                <label htmlFor="style" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
-                  Visual Style
-                </label>
-                <select
-                  id="style"
-                  value={style}
-                  onChange={(e) => setStyle(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'right 0.5rem center',
-                    backgroundSize: '10px 6px',
-                    paddingRight: '1.5rem',
-                  }}
-                >
-                  {styleOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="bg-neutral-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Mood */}
-              <div className="flex-1">
-                <label htmlFor="mood" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
-                  Mood
-                </label>
-                <select
-                  id="mood"
-                  value={mood}
-                  onChange={(e) => setMood(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'right 0.5rem center',
-                    backgroundSize: '10px 6px',
-                    paddingRight: '1.5rem',
-                  }}
-                >
-                  {moodOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="bg-neutral-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* Aspect Ratio + Duration - Row 2 */}
-            <div className="animate-fade-in flex gap-3" style={{ animationDelay: '0.4s' }}>
-              {/* Aspect Ratio */}
-              <div className="flex-1">
-                <label htmlFor="aspectRatio" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
-                  Aspect Ratio
-                </label>
-                <select
-                  id="aspectRatio"
-                  value={aspectRatio}
-                  onChange={(e) => setAspectRatio(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'right 0.5rem center',
-                    backgroundSize: '10px 6px',
-                    paddingRight: '1.5rem',
-                  }}
-                >
-                  {aspectRatioOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="bg-neutral-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Duration */}
-              <div className="flex-1">
-                <label htmlFor="duration" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
-                  Duration
-                </label>
-                <select
-                  id="duration"
-                  value={duration}
-                  onChange={(e) => setDuration(Number(e.target.value))}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'right 0.5rem center',
-                    backgroundSize: '10px 6px',
-                    paddingRight: '1.5rem',
-                  }}
-                >
-                  {durationOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="bg-neutral-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* Color Palette + Pacing - Row 3 */}
-            <div className="animate-fade-in flex gap-3" style={{ animationDelay: '0.5s' }}>
-              {/* Color Palette */}
-              <div className="flex-1">
-                <label htmlFor="colorPalette" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
-                  Color Palette
-                </label>
-                <select
-                  id="colorPalette"
-                  value={colorPalette}
-                  onChange={(e) => setColorPalette(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'right 0.5rem center',
-                    backgroundSize: '10px 6px',
-                    paddingRight: '1.5rem',
-                  }}
-                >
-                  {colorPaletteOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="bg-neutral-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Pacing */}
-              <div className="flex-1">
-                <label htmlFor="pacing" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
-                  Pacing
-                </label>
-                <select
-                  id="pacing"
-                  value={pacing}
-                  onChange={(e) => setPacing(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'right 0.5rem center',
-                    backgroundSize: '10px 6px',
-                    paddingRight: '1.5rem',
-                  }}
-                >
-                  {pacingOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="bg-neutral-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* Video and Image Models - Side by Side */}
-            <div className="animate-fade-in flex gap-3" style={{ animationDelay: '0.6s' }}>
-              {/* Video Models */}
-              <div className="flex-1">
-                <label htmlFor="videoModelId" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
-                  Video Models
-                </label>
-                <select
-                  id="videoModelId"
-                  value={videoModelId}
-                  onChange={(e) => setVideoModelId(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'right 0.5rem center',
-                    backgroundSize: '10px 6px',
-                    paddingRight: '1.5rem',
-                  }}
-                >
-                  {videoModelOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="bg-neutral-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Image Models */}
-              <div className="flex-1">
-                <label htmlFor="imageModelId" className="block text-sm font-medium text-white/70 mb-2 uppercase tracking-wider">
-                  Image Models
-                </label>
-                <select
-                  id="imageModelId"
-                  value={imageModelId}
-                  onChange={(e) => setImageModelId(e.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-white/5 backdrop-blur-sm px-2.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer hover:bg-white/10"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundRepeat: 'no-repeat',
-                    backgroundPosition: 'right 0.5rem center',
-                    backgroundSize: '10px 6px',
-                    paddingRight: '1.5rem',
-                  }}
-                >
-                  {imageModelOptions.map((option) => (
-                    <option key={option.value} value={option.value} className="bg-neutral-900">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* Use Reference Frame Checkbox */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.65s' }}>
-              <label className="flex items-center gap-2 cursor-pointer group">
-                <input
-                  type="checkbox"
-                  checked={useReferenceFrame}
-                  onChange={(e) => setUseReferenceFrame(e.target.checked)}
-                  className="w-4 h-4 rounded border-white/20 bg-white/5 text-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:ring-offset-0 cursor-pointer"
-                />
-                <span className="text-sm text-white/70 group-hover:text-white transition-colors">
-                  Use last frame as reference for scene transitions
-                </span>
-              </label>
-              <p className="mt-1 ml-6 text-xs text-white/50">
-                Helps maintain visual continuity between scenes (may trigger content filters)
-              </p>
-            </div>
-          </div>
-
-          {/* Settings Label at Bottom */}
-          <div className="mt-auto pt-6 border-t border-white/10">
-            <div className="flex items-center gap-3">
-              <Settings className="w-5 h-5 text-blue-400" />
-              <h2 className="text-lg font-semibold text-white/70">Settings</h2>
-            </div>
-          </div>
-        </div>
-
-        {/* Center Panel - Main Content */}
-        <div className="flex-1 flex flex-col items-center justify-center p-8 animate-fade-in relative" style={{ marginLeft: '8rem', marginRight: '8rem' }}>
-          <div className="w-full max-w-3xl space-y-6">
-            {/* Project Name - Top Left */}
-            <div className="flex items-center gap-3 animate-slide-in-up -mt-4">
-              {isEditingProjectName ? (
-                <div className="flex items-center gap-2 flex-1">
-                  <input
-                    type="text"
-                    value={tempProjectName}
-                    onChange={(e) => setTempProjectName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        saveProjectName();
-                      } else if (e.key === 'Escape') {
-                        cancelEditingProjectName();
-                      }
-                    }}
-                    autoFocus
-                    className="flex-1 px-4 py-2 rounded-lg border border-blue-500/50 bg-black/30 backdrop-blur-sm text-white text-lg font-semibold focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                  />
-                  <button
-                    onClick={saveProjectName}
-                    className="p-2 text-green-400 hover:text-green-300 hover:bg-white/10 rounded-lg transition-colors"
-                  >
-                    <Check className="w-5 h-5" />
-                  </button>
-                  <button
-                    onClick={cancelEditingProjectName}
-                    className="p-2 text-red-400 hover:text-red-300 hover:bg-white/10 rounded-lg transition-colors"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center gap-3">
-                  <h2 className="text-2xl font-bold text-white">
-                    {projectName || 'Project 1'}
-                  </h2>
-                  <button
-                    onClick={startEditingProjectName}
-                    className="p-1.5 text-white/60 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-                    title="Edit project name"
-                  >
-                    <Pencil className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Header */}
-            <div className="space-y-2 animate-slide-in-up -mt-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center animate-pulse-slow">
-                  <Bot className="w-5 h-5 text-blue-400" />
-                </div>
-                <h1 className="text-2xl font-bold text-white">
-                  Create Your Video
-                </h1>
-              </div>
-              <p className="text-white/70 text-sm ml-[3.25rem]">
-                Describe your video idea and we'll help you bring it to life with AI-powered creativity
-              </p>
-            </div>
-
-            <form onSubmit={handleSubmit} className="space-y-6">
-              {/* Prompt Input - Center Stage */}
-              <div className="animate-slide-in-up" style={{ animationDelay: '0.2s' }}>
-                <div className="relative group">
-                  <textarea
-                    id="prompt"
-                    value={prompt}
-                    onChange={(e) => {
-                      setPrompt(e.target.value);
-                      // Auto-resize textarea
-                      e.target.style.height = 'auto';
-                      e.target.style.height = e.target.scrollHeight + 'px';
-                    }}
-                    placeholder="Describe your video idea in detail... What story do you want to tell? What visuals should appear? What mood should it convey?"
-                    rows={12}
-                    className="w-full rounded-2xl border-2 border-white/10 bg-black/30 backdrop-blur-xl px-6 py-5 text-white placeholder-white/30 focus:border-blue-500/50 focus:outline-none focus:ring-4 focus:ring-blue-500/20 transition-all resize-none text-base leading-relaxed shadow-2xl overflow-y-auto min-h-[200px] max-h-[400px]"
-                    required
-                    style={{ minHeight: '200px', maxHeight: '400px' }}
-                  />
-                  <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-blue-500/5 to-purple-500/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
-                </div>
-                <p className="mt-3 text-xs text-white/50 text-center">
-                  Be as detailed as possible. The more information you provide, the better the result.
-                </p>
-              </div>
-
-              {/* Submit Button */}
-              <div className="animate-slide-in-up" style={{ animationDelay: '0.3s' }}>
-                <button
-                  type="submit"
-                  disabled={!prompt.trim() || isCreating}
-                  className="w-full bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 text-white py-4 rounded-xl font-semibold text-lg hover:shadow-2xl hover:shadow-blue-500/40 hover:scale-[1.02] transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2 relative overflow-hidden group"
-                >
-                  <span className="relative z-10 flex items-center gap-2">
-                    {isCreating ? (
-                      <>
-                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                        Creating...
-                      </>
-                    ) : (
-                      <>
-                        Create Video
-                        <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
-                      </>
-                    )}
-                  </span>
-                  <div className="absolute inset-0 bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600 opacity-0 group-hover:opacity-100 transition-opacity" />
-                </button>
-              </div>
-            </form>
-
-            {/* Quick Examples */}
-            <div className="animate-fade-in" style={{ animationDelay: '0.4s' }}>
-              <p className="text-xs text-white/50 mb-3 text-center">Need inspiration? Try these:</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {[
-                  {
-                    title: "Product Showcase",
-                    prompt: "Sleek smartphone showcase with smooth transitions",
-                    detailed: "Create a sleek and modern product showcase video for a new smartphone. Feature close-up shots highlighting the device's premium design, display quality, and key features. Include smooth transitions between different angles, showcase the phone's camera capabilities with sample photos, demonstrate the user interface with fluid animations, and end with a dynamic reveal of the product in various lifestyle settings. Use professional lighting, clean backgrounds, and emphasize the device's sleek form factor and innovative technology."
-                  },
-                  {
-                    title: "Music Video",
-                    prompt: "Energetic music video with vibrant colors",
-                    detailed: "Produce an energetic and vibrant music video with dynamic camera movements and bold visual style. Include fast-paced cuts, colorful lighting effects, and rhythmic transitions that sync with the beat. Feature diverse locations from urban streets to abstract digital environments. Incorporate creative camera techniques like slow-motion, time-lapse, and tracking shots. Use a vibrant color palette with neon accents, dynamic particle effects, and stylized visual treatments. Include performance shots, abstract visual sequences, and moments that capture the energy and emotion of the music."
-                  },
-                  {
-                    title: "Explainer Video",
-                    prompt: "Simple explainer breaking down how AI works",
-                    detailed: "Create an engaging explainer video that breaks down how artificial intelligence works in simple, accessible terms. Use clear visual metaphors, animated diagrams, and step-by-step demonstrations. Start with a relatable analogy, then gradually introduce key concepts like machine learning, neural networks, and data processing. Include animated illustrations showing how AI systems learn from data, make predictions, and improve over time. Use a friendly, approachable tone with clean graphics, smooth animations, and real-world examples that viewers can relate to. End with practical applications of AI in everyday life."
-                  },
-                  {
-                    title: "Luxury Brand Ad",
-                    prompt: "Elegant luxury ad with premium visuals",
-                    detailed: "Craft an elegant and sophisticated luxury brand advertisement that exudes premium quality and timeless sophistication. Feature high-end products in refined settings with meticulous attention to detail. Use slow, deliberate camera movements, soft natural lighting, and rich color palettes with gold and deep tones. Include close-up shots highlighting craftsmanship, premium materials, and exquisite details. Showcase the brand's heritage and values through carefully curated scenes of luxury lifestyle, refined environments, and aspirational moments. Emphasize exclusivity, quality, and the prestige associated with the brand through cinematic visuals and elegant pacing."
-                  },
-                ].map((example, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => setPrompt(example.detailed)}
-                    className="text-left p-2.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 hover:border-white/20 hover:scale-[1.02] transition-all backdrop-blur-sm"
-                  >
-                    <div className="font-medium mb-0.5 text-sm text-white/80">{example.title}</div>
-                    <div className="text-xs text-white/50 leading-tight">{example.prompt}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Load Draft, Save Draft and Reset Buttons - Bottom Right, aligned with max-w-3xl panel */}
-          <div className="absolute bottom-8 flex gap-3" style={{ right: 'calc(50% - 24rem + 2rem)' }}>
-            <button
-              type="button"
-              onClick={loadDraft}
-              className="px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-white hover:bg-white/10 transition-colors"
-            >
-              Load Draft
-            </button>
-            <button
-              type="button"
-              onClick={saveDraft}
-              className="px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-white hover:bg-white/10 transition-colors"
-            >
-              Save Draft
-            </button>
-            <button
-              type="button"
-              onClick={resetForm}
-              className="px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-white hover:bg-white/10 transition-colors flex items-center gap-2"
-            >
-              <RotateCcw className="w-4 h-4" />
-              Reset
-            </button>
-          </div>
-        </div>
+        {/* Center Panel - Scrollable Content */}
+        <MiddleSection
+          projectName={projectName}
+          isEditingProjectName={isEditingProjectName}
+          tempProjectName={tempProjectName}
+          onProjectNameChange={setTempProjectName}
+          onStartEditingProjectName={startEditingProjectName}
+          onSaveProjectName={saveProjectName}
+          onCancelEditingProjectName={cancelEditingProjectName}
+          anchorImagePrompts={anchorImagePrompts}
+          onAnchorImagePromptChange={(index, prompt) => {
+            setAnchorImagePrompts(prev => {
+              const newPrompts = [...prev];
+              newPrompts[index] = prompt;
+              return newPrompts;
+            });
+          }}
+          expandedAssetIndex={expandedAssetIndex}
+          onExpandedAssetIndexChange={setExpandedAssetIndex}
+          generatedAnchorImages={generatedAnchorImages}
+          isGeneratingAssets={isGeneratingAssets}
+          onGenerateAnchorImage={handleGenerateAnchorImage}
+          onGenerateAllAssets={handleGenerateAllAssets}
+          onAddAssetSlot={handleAddAssetSlot}
+          onRemoveAnchorImage={handleRemoveAnchorImage}
+          onAnchorImageClick={handleAnchorImageClick}
+          scenes={scenes}
+          onScenesChange={setScenes}
+          onScenePromptChange={handleScenePromptChange}
+          onSceneExtendPreviousChange={handleSceneExtendPreviousChange}
+          onSceneSelectedAssetIdsChange={handleSceneSelectedAssetIdsChange}
+          onSceneGenerate={handleSceneGenerate}
+          onAddScene={handleAddScene}
+          onRemoveScene={handleRemoveScene}
+          onSceneVideoClick={handleSceneVideoClick}
+          imageModelId={imageModelId}
+          aspectRatio={aspectRatio}
+          glassTextareaStyle={glassTextareaStyle}
+          continuous={continuous}
+          onContinuousChange={setContinuous}
+          parallel={parallel}
+          onParallelChange={setParallel}
+          isGeneratingAll={isGeneratingAll}
+          onGenerateAll={async () => await handleGenerateAll(false)}
+          onGenerateAllParallel={async () => await handleGenerateAll(true)}
+          onStitchScenes={handleStitchScenes}
+          isStitching={isStitching}
+          onReorderAssets={handleReorderAssets}
+          musicPrompt={musicPrompt}
+          onMusicPromptChange={setMusicPrompt}
+          generatedMusicUrl={generatedMusicUrl}
+          isGeneratingMusic={isGeneratingMusic}
+          onGenerateMusic={handleGenerateMusic}
+          finalVideoUrl={finalVideoUrl}
+        />
 
         {/* Right Panel - Reserved for future features */}
         <div className="w-96 flex-shrink-0">
@@ -1511,6 +2392,25 @@ function SimpleCreateContent() {
           onError={handleGenerationError}
         />
       )}
+
+      {/* Anchor Image Preview Modal */}
+      {showAnchorImageModal && generatedAnchorImages.length > 0 && (
+        <PreviewModal
+          items={generatedAnchorImages.map(img => ({
+            id: img.id,
+            type: 'image' as const,
+            url: img.url,
+            title: `Asset ${img.assetNumber}`,
+            description: img.prompt,
+          }))}
+          initialIndex={selectedAnchorImageIndex}
+          isOpen={showAnchorImageModal}
+          onClose={() => setShowAnchorImageModal(false)}
+        />
+      )}
+
+      {/* Scene Slideshow Modal */}
+      {sceneModalContent}
     </div>
   );
 }

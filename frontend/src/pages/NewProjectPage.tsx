@@ -231,7 +231,7 @@ function NewProjectContent() {
                   type="number"
                   id="duration"
                   {...register("duration", { valueAsNumber: true })}
-                  min={15}
+                  min={4}
                   max={300}
                   className="w-full rounded-lg border border-white/10 bg-surface px-4 py-3 text-white focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20 transition-all"
                 />

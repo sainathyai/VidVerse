@@ -21,23 +21,20 @@ export function planScenes(
   const promptLength = overallPrompt.length;
   const isComplex = promptLength > 200 || (parsedPrompt.keywords && parsedPrompt.keywords.length > 5);
   
-  if (totalDuration <= 5) {
-    // Maximum 2 scenes for 5 sec video
-    numScenes = isComplex ? 2 : 1;
-  } else if (totalDuration <= 15) {
-    // Maximum 3 scenes for 15 seconds
-    numScenes = isComplex ? 3 : 2;
-  } else if (totalDuration <= 30) {
-    // Maximum 5 scenes for 30 secs
-    numScenes = isComplex ? 5 : 3;
+  // Maximum scene duration is 8 seconds (Veo 3.1 max)
+  // Each scene should be max 8 seconds, so calculate minimum scenes needed
+  const MAX_SCENE_DURATION = 8;
+  const minScenesNeeded = Math.ceil(totalDuration / MAX_SCENE_DURATION);
+  
+  // Calculate number of scenes based on total duration
+  // Ensure each scene is <= 8 seconds
+  if (totalDuration <= 8) {
+    // Single scene for 8 seconds or less
+    numScenes = 1;
   } else {
-    // 5-8 scenes for 60 sec video depending on concept and script length
-    if (totalDuration <= 60) {
-      numScenes = isComplex ? Math.min(8, Math.max(5, Math.floor(promptLength / 100))) : 5;
-    } else {
-      // For longer videos, scale up proportionally
-      numScenes = Math.min(10, Math.max(5, Math.floor(totalDuration / 10)));
-    }
+    // For longer videos, use minimum scenes needed to keep each scene <= 8 seconds
+    // This ensures: 30s = 4 scenes, 60s = 8 scenes, 90s = 12 scenes, 120s = 15 scenes, 240s = 30 scenes
+    numScenes = minScenesNeeded;
   }
 
   const sceneDuration = totalDuration / numScenes;
@@ -165,7 +162,19 @@ function generateScenePrompt(
   ].filter(Boolean).join(', ');
 
   // Build scene prompt with unique content
-  let scenePrompt = sceneContext + sceneContent;
+  // IMPORTANT: For better detail preservation, include the full prompt context
+  // with scene-specific focus, especially if the split content is short
+  let scenePrompt = '';
+  
+  if (sceneContent.length < 200 && overallPrompt.length > 300) {
+    // If scene content is too short, use full prompt with scene-specific context
+    // This ensures all details are preserved, especially for later scenes
+    scenePrompt = `${sceneContext}${overallPrompt}`;
+    console.log(`[SCENE PLANNER] Scene ${sceneNumber}: Using full prompt (${overallPrompt.length} chars) to preserve details (split content was only ${sceneContent.length} chars)`);
+  } else {
+    // Use the split content with scene context
+    scenePrompt = sceneContext + sceneContent;
+  }
   
   // Add continuity instructions for scenes after the first
   if (sceneNumber > 1) {

@@ -365,11 +365,21 @@ export async function authRoutes(fastify: FastifyInstance, options: FastifyPlugi
         });
       }
 
+      const expiresIn = response.AuthenticationResult.ExpiresIn || 3600; // Default to 1 hour if not provided
+      
+      // Log token expiration details
+      fastify.log.info({
+        expiresInSeconds: expiresIn,
+        expiresInMinutes: Math.round(expiresIn / 60),
+        expiresInHours: (expiresIn / 3600).toFixed(2),
+        hasRefreshToken: !!response.AuthenticationResult.RefreshToken,
+      }, 'Token expiration details');
+      
       return {
         accessToken: response.AuthenticationResult.AccessToken,
         idToken: response.AuthenticationResult.IdToken,
         refreshToken: response.AuthenticationResult.RefreshToken,
-        expiresIn: response.AuthenticationResult.ExpiresIn,
+        expiresIn: expiresIn,
       };
     } catch (error: any) {
       fastify.log.error({ err: error }, 'Sign in error');
@@ -619,6 +629,99 @@ export async function authRoutes(fastify: FastifyInstance, options: FastifyPlugi
       return reply.code(400).send({
         error: 'Password Reset Failed',
         message: error.message || 'Failed to reset password',
+      });
+    }
+  });
+
+  /**
+   * POST /api/auth/refresh
+   * Refresh access token using refresh token
+   */
+  fastify.post('/auth/refresh', async (request: FastifyRequest, reply: FastifyReply) => {
+    const body = request.body as { refreshToken: string; username?: string; idToken?: string };
+    
+    if (!body.refreshToken) {
+      return reply.code(400).send({
+        error: 'Bad Request',
+        message: 'Refresh token is required',
+      });
+    }
+
+    const cognitoClient = getCognitoClient();
+    if (!cognitoClient) {
+      return reply.code(503).send({
+        error: 'Service Unavailable',
+        message: 'Cognito is not configured',
+      });
+    }
+
+    try {
+      // Extract username from request body, ID token, or try to decode from refresh token
+      let username: string | undefined = body.username;
+      
+      // If username not provided, try to extract from ID token
+      if (!username && body.idToken) {
+        try {
+          const idTokenPayload = JSON.parse(Buffer.from(body.idToken.split('.')[1], 'base64').toString());
+          username = idTokenPayload['cognito:username'] || idTokenPayload.email || idTokenPayload.username;
+        } catch (e) {
+          fastify.log.warn('Could not extract username from ID token');
+        }
+      }
+
+      // Calculate secret hash using username (required for REFRESH_TOKEN_AUTH when client has secret)
+      // SECRET_HASH = HMAC_SHA256(clientSecret, username + clientId)
+      const secretHash = config.cognito.clientSecret && config.cognito.clientId && username
+        ? createHmac('sha256', config.cognito.clientSecret)
+            .update(username + config.cognito.clientId)
+            .digest('base64')
+        : undefined;
+
+      // If client has secret but we can't calculate SECRET_HASH (missing username), return error
+      if (config.cognito.clientSecret && !secretHash) {
+        fastify.log.error('Client secret is configured but username not available for SECRET_HASH calculation');
+        return reply.code(400).send({
+          error: 'Bad Request',
+          message: 'Username is required for token refresh when client secret is configured. Please include idToken or username in the request.',
+        });
+      }
+
+      const command = new InitiateAuthCommand({
+        ClientId: config.cognito.clientId!,
+        AuthFlow: AuthFlowType.REFRESH_TOKEN_AUTH,
+        AuthParameters: {
+          REFRESH_TOKEN: body.refreshToken,
+          ...(secretHash && { SECRET_HASH: secretHash }),
+        },
+      });
+
+      const response = await cognitoClient.send(command);
+
+      if (!response.AuthenticationResult) {
+        return reply.code(401).send({
+          error: 'Token Refresh Failed',
+          message: 'Invalid or expired refresh token',
+        });
+      }
+
+      const expiresIn = response.AuthenticationResult.ExpiresIn || 3600;
+      
+      fastify.log.info({
+        expiresInSeconds: expiresIn,
+        expiresInMinutes: Math.round(expiresIn / 60),
+        expiresInHours: (expiresIn / 3600).toFixed(2),
+      }, 'Token refreshed successfully');
+      
+      return {
+        accessToken: response.AuthenticationResult.AccessToken,
+        idToken: response.AuthenticationResult.IdToken,
+        expiresIn: expiresIn,
+      };
+    } catch (error: any) {
+      fastify.log.error({ err: error }, 'Token refresh error');
+      return reply.code(401).send({
+        error: 'Token Refresh Failed',
+        message: error.message || 'Failed to refresh token',
       });
     }
   });

@@ -17,6 +17,12 @@ interface AIChatPanelProps {
     duration?: number;
   };
   onApplyPrompt?: (prompt: string) => void;
+  onImportProject?: (projectData: {
+    script?: string;
+    assets?: Array<{ name: string; prompt: string }>;
+    scenes?: Array<{ sceneNumber: number; prompt: string; assetIds: string[] }>;
+    music?: { lyrics?: string; prompt?: string; bitrate?: string; sample_rate?: string; audio_format?: string };
+  }) => void;
 }
 
 interface AttachedFile {
@@ -33,6 +39,7 @@ interface ChatMessage {
   isQuestion?: boolean;
   showImport?: boolean;
   attachedFiles?: AttachedFile[];
+  structuredData?: any; // Parsed JSON project data
 }
 
 interface DefaultPrompt {
@@ -42,13 +49,13 @@ interface DefaultPrompt {
   prompt: string;
 }
 
-export function AIChatPanel({ projectId, projectContext, onApplyPrompt }: AIChatPanelProps) {
-  const [isOpen, setIsOpen] = useState(false);
+export function AIChatPanel({ projectId, projectContext, onApplyPrompt, onImportProject }: AIChatPanelProps) {
+  const [isOpen, setIsOpen] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [selectedModel, setSelectedModel] = useState<string>('openai/gpt-4o-mini');
+  const [selectedModel, setSelectedModel] = useState<string>('anthropic/claude-4.5-sonnet');
   const [showDefaultPrompts, setShowDefaultPrompts] = useState(true);
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
@@ -285,11 +292,29 @@ Ask me questions to better understand my vision, then provide creative recommend
       // Also check if response contains structured content (code blocks, markdown, etc.)
       const hasStructuredContent = /```|```[\w]*\n|#+\s|^\*\*|^\* /m.test(responseText);
       
+      // Check if response contains structured JSON project data
+      const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
+      let structuredProjectData: any = null;
+      if (jsonMatch && jsonMatch[1]) {
+        try {
+          structuredProjectData = JSON.parse(jsonMatch[1]);
+          // Validate it has the expected structure
+          if (structuredProjectData && (structuredProjectData.assets || structuredProjectData.scenes || structuredProjectData.script)) {
+            // Valid structured project data
+          } else {
+            structuredProjectData = null;
+          }
+        } catch (e) {
+          structuredProjectData = null;
+        }
+      }
+      
       // Show import button if:
       // 1. User explicitly requested import, OR
       // 2. Assistant says it's final/ready, OR
       // 3. Response has structured content (likely a script/prompt)
-      const showImport = userRequestedImport || hasFinalKeywords || hasStructuredContent;
+      // 4. Response contains structured project JSON
+      const showImport = userRequestedImport || hasFinalKeywords || hasStructuredContent || !!structuredProjectData;
 
       const assistantMessage: ChatMessage = {
         id: `assistant-${Date.now()}`,
@@ -298,6 +323,7 @@ Ask me questions to better understand my vision, then provide creative recommend
         timestamp: new Date(),
         isQuestion,
         showImport,
+        structuredData: structuredProjectData, // Store parsed JSON for easy access
       };
 
       setMessages(prev => [...prev, assistantMessage]);
@@ -438,43 +464,63 @@ Ask me questions to better understand my vision, then provide creative recommend
                   </div>
                 )}
                 <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
-                {message.role === 'assistant' && onApplyPrompt && message.showImport && (
-                  <button
-                    onClick={() => {
-                      // Try to extract the main prompt/script from the message
-                      // Look for common patterns like "Here's your prompt:", "Final script:", etc.
-                      let extractedPrompt = message.content;
-                      
-                      // Try to find a section marked as prompt/script
-                      const promptPatterns = [
-                        /(?:here'?s|final|your|the)\s+(?:video\s+)?(?:prompt|script|description)[:]\s*\n?\n?([\s\S]+?)(?:\n\n|\n---|\n###|$)/i,
-                        /(?:prompt|script)[:]\s*\n?\n?([\s\S]+?)(?:\n\n|\n---|\n###|$)/i,
-                        /```[\s\S]*?\n([\s\S]+?)\n```/,
-                      ];
-                      
-                      for (const pattern of promptPatterns) {
-                        const match = message.content.match(pattern);
-                        if (match && match[1]) {
-                          extractedPrompt = match[1].trim();
-                          break;
-                        }
-                      }
-                      
-                      // Clean up the prompt (remove markdown formatting, extra whitespace)
-                      extractedPrompt = extractedPrompt
-                        .replace(/^\*\*|^\*|^#+\s*/gm, '') // Remove markdown bold/headers
-                        .replace(/\*\*/g, '') // Remove bold markers
-                        .replace(/```[\w]*\n?/g, '') // Remove code blocks
-                        .replace(/\n{3,}/g, '\n\n') // Normalize multiple newlines
-                        .trim();
-                      
-                      onApplyPrompt(extractedPrompt);
-                    }}
-                    className="mt-3 text-xs px-3 py-1.5 rounded-lg border border-blue-500/50 bg-gradient-to-r from-blue-500/20 to-purple-500/20 hover:from-blue-500/30 hover:to-purple-500/30 transition-all flex items-center gap-2 font-medium text-blue-300 hover:text-blue-200 shadow-sm hover:shadow-md"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                    Import to Prompt
-                  </button>
+                {message.role === 'assistant' && message.showImport && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {message.structuredData && onImportProject ? (
+                      <button
+                        onClick={() => {
+                          onImportProject(message.structuredData);
+                        }}
+                        className="text-xs px-3 py-1.5 rounded-lg border border-green-500/50 bg-gradient-to-r from-green-500/20 to-emerald-500/20 hover:from-green-500/30 hover:to-emerald-500/30 transition-all flex items-center gap-2 font-medium text-green-300 hover:text-green-200 shadow-sm hover:shadow-md"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        Import Full Project
+                      </button>
+                    ) : null}
+                    {onApplyPrompt && (
+                      <button
+                        onClick={() => {
+                          // Try to extract the main prompt/script from the message
+                          // Look for common patterns like "Here's your prompt:", "Final script:", etc.
+                          let extractedPrompt = message.content;
+                          
+                          // If structured data exists, use the script from it
+                          if (message.structuredData?.script) {
+                            extractedPrompt = message.structuredData.script;
+                          } else {
+                            // Try to find a section marked as prompt/script
+                            const promptPatterns = [
+                              /(?:here'?s|final|your|the)\s+(?:video\s+)?(?:prompt|script|description)[:]\s*\n?\n?([\s\S]+?)(?:\n\n|\n---|\n###|$)/i,
+                              /(?:prompt|script)[:]\s*\n?\n?([\s\S]+?)(?:\n\n|\n---|\n###|$)/i,
+                              /```[\s\S]*?\n([\s\S]+?)\n```/,
+                            ];
+                            
+                            for (const pattern of promptPatterns) {
+                              const match = message.content.match(pattern);
+                              if (match && match[1]) {
+                                extractedPrompt = match[1].trim();
+                                break;
+                              }
+                            }
+                            
+                            // Clean up the prompt (remove markdown formatting, extra whitespace)
+                            extractedPrompt = extractedPrompt
+                              .replace(/^\*\*|^\*|^#+\s*/gm, '') // Remove markdown bold/headers
+                              .replace(/\*\*/g, '') // Remove bold markers
+                              .replace(/```[\w]*\n?/g, '') // Remove code blocks
+                              .replace(/\n{3,}/g, '\n\n') // Normalize multiple newlines
+                              .trim();
+                          }
+                          
+                          onApplyPrompt(extractedPrompt);
+                        }}
+                        className="text-xs px-3 py-1.5 rounded-lg border border-blue-500/50 bg-gradient-to-r from-blue-500/20 to-purple-500/20 hover:from-blue-500/30 hover:to-purple-500/30 transition-all flex items-center gap-2 font-medium text-blue-300 hover:text-blue-200 shadow-sm hover:shadow-md"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        Import to Prompt
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>

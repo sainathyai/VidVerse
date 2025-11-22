@@ -12,6 +12,7 @@ import { assetRoutes } from './routes/assets';
 import { jobRoutes } from './routes/jobs';
 import { authRoutes } from './routes/auth';
 import { chatRoutes } from './routes/chat';
+import { imageRoutes } from './routes/images';
 import multipart from '@fastify/multipart';
 import { setFastifyInstance } from './middleware/cognito';
 import { testConnection } from './services/database';
@@ -125,6 +126,7 @@ async function registerRoutes() {
   await fastify.register(assetRoutes, { prefix: '/api' });
   await fastify.register(jobRoutes, { prefix: '/api' });
   await fastify.register(chatRoutes, { prefix: '/api' });
+  await fastify.register(imageRoutes, { prefix: '/api' });
 }
 
 // Error handler

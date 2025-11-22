@@ -136,12 +136,21 @@ export async function uploadFile(
 
   await s3Client.send(command);
 
-  const publicUrl = config.storage.endpoint
-    ? `${config.storage.endpoint}/${bucket}/${key}`
-    : `https://${bucket}.s3.${config.storage.region}.amazonaws.com/${key}`;
+  // Generate presigned URL if enabled, otherwise use public URL
+  let url: string;
+  if (config.storage.usePresignedUrls) {
+    // Generate presigned URL (24 hour expiration for long-term access)
+    url = await generateDownloadUrl(key, 86400); // 24 hours
+    console.log(`[STORAGE] Generated presigned URL for uploaded file: ${key.substring(0, 50)}...`);
+  } else {
+    // Use public URL if presigned URLs are disabled
+    url = config.storage.endpoint
+      ? `${config.storage.endpoint}/${bucket}/${key}`
+      : `https://${bucket}.s3.${config.storage.region}.amazonaws.com/${key}`;
+  }
 
   return {
-    url: publicUrl,
+    url,
     key,
     bucket,
   };

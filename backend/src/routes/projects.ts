@@ -21,6 +21,7 @@ const createProjectSchema = z.object({
   videoModelId: z.string().optional(),
   imageModelId: z.string().optional(),
   useReferenceFrame: z.boolean().optional(),
+  continuous: z.boolean().optional(),
   mode: z.enum(['classic', 'agentic']).default('classic'),
   audioUrl: z.string().url().optional(), // Store uploaded audio URL
 });
@@ -77,28 +78,40 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
     
     // Check for duplicate project name and auto-append sequential number
     let finalProjectName = projectName;
-    let counter = 1;
     
-    while (true) {
-      const existingProject = await queryOne(
-        'SELECT id FROM projects WHERE user_id = $1 AND name = $2',
+    // First check if base name exists
+    const baseNameExists = await queryOne(
+      'SELECT id FROM projects WHERE user_id = $1 AND name = $2',
+      [userId, finalProjectName]
+    );
+
+    if (baseNameExists) {
+      // Base name exists, find the highest number used
+      const projectsWithSameBase = await query(
+        `SELECT name FROM projects 
+         WHERE user_id = $1 AND name LIKE $2 || '%'
+         ORDER BY name`,
         [userId, finalProjectName]
       );
-
-      if (!existingProject) {
-        // Name is available, use it
-        break;
-      }
-
-      // Name exists, try with number appended
-      counter++;
-      finalProjectName = `${projectName} ${counter}`;
       
-      // Safety check to prevent infinite loop
-      if (counter > 1000) {
-        finalProjectName = `${projectName} ${Date.now()}`;
-        break;
+      let maxNumber = 0;
+      const baseNameRegex = new RegExp(`^${projectName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: (\\d+))?$`);
+      
+      for (const proj of projectsWithSameBase) {
+        const match = (proj.name as string).match(baseNameRegex);
+        if (match) {
+          if (match[1]) {
+            const num = parseInt(match[1], 10);
+            if (num > maxNumber) maxNumber = num;
+          } else {
+            // No number means it's the base name itself
+            if (maxNumber === 0) maxNumber = 1;
+          }
+        }
       }
+      
+      // Use next available number
+      finalProjectName = maxNumber > 0 ? `${projectName} ${maxNumber + 1}` : `${projectName} 2`;
     }
     
     projectName = finalProjectName;
@@ -125,6 +138,7 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
           videoModelId: data.videoModelId,
           imageModelId: data.imageModelId,
           useReferenceFrame: data.useReferenceFrame !== undefined ? data.useReferenceFrame : false, // Default to false (user must opt-in)
+          continuous: data.continuous !== undefined ? data.continuous : false, // Default to false
           audioUrl: data.audioUrl,
         }),
       ]
@@ -189,339 +203,8 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
       const duration = config.duration || 60;
       const videoDuration = duration; // Duration in seconds
 
-      // Detect if the prompt is already a script or just context
-      const isScriptFormat = (text: string, duration: number): boolean => {
-        if (!text || text.trim().length === 0) return false;
-        
-        // Factor 1: Length-based detection - if more than 300 words per second, likely a script
-        const wordCount = text.trim().split(/\s+/).length;
-        const wordsPerSecond = wordCount / duration;
-        if (wordsPerSecond >= 300) {
-          fastify.log.info({ projectId, wordCount, duration, wordsPerSecond }, 'Detected as script based on length (>=300 words/sec)');
-          return true;
-        }
-        
-        // Factor 2: Check for numbered scenes (e.g., "Scene 1", "Scene 2", "Scene:", etc.)
-        const sceneNumberPatterns = [
-          /scene\s+\d+/i,
-          /scene\s*:\s*\d+/i,
-          /scene\s*#\s*\d+/i,
-          /^\s*\d+\.\s*scene/i,
-          /scene\s*number\s*\d+/i,
-        ];
-        const hasNumberedScenes = sceneNumberPatterns.some(pattern => pattern.test(text));
-        if (hasNumberedScenes) {
-          fastify.log.info({ projectId }, 'Detected as script based on numbered scenes');
-          return true;
-        }
-        
-        // Factor 3: Check for duration mentions in scenes
-        const durationPatterns = [
-          /duration\s*:\s*\d+/i,
-          /duration\s*=\s*\d+/i,
-          /\d+\s*seconds?/i,
-          /startTime|endTime/i,
-        ];
-        const hasDurationInfo = durationPatterns.some(pattern => pattern.test(text));
-        if (hasDurationInfo && hasNumberedScenes) {
-          fastify.log.info({ projectId }, 'Detected as script based on duration info with scenes');
-          return true;
-        }
-        
-        // Factor 4: Check for JSON structure with script keywords
-        try {
-          const parsed = JSON.parse(text);
-          // Check if it has script-like structure
-          if (parsed.scenes && Array.isArray(parsed.scenes)) {
-            return true;
-          }
-          if (parsed.overallPrompt && parsed.parsedPrompt) {
-            return true;
-          }
-          if (parsed.sceneNumber !== undefined) {
-            return true;
-          }
-        } catch {
-          // Not valid JSON, check for script-like patterns
-        }
-        
-        // Factor 5: Check for script-related keywords (case-insensitive)
-        const scriptKeywords = [
-          '"sceneNumber"', '"scenes"', '"overallPrompt"', '"parsedPrompt"',
-          'sceneNumber', 'scenes', 'overallPrompt', 'parsedPrompt',
-          'scene 1', 'scene 2', 'scene:', 'scene number',
-          'startTime', 'endTime', 'duration', 'scene prompt'
-        ];
-        
-        const lowerText = text.toLowerCase();
-        const keywordMatches = scriptKeywords.filter(keyword => 
-          lowerText.includes(keyword.toLowerCase())
-        );
-        
-        // If we find multiple script keywords, it's likely a script
-        if (keywordMatches.length >= 2) {
-          return true;
-        }
-        
-        // Factor 6: Check for JSON-like structure with scenes
-        if (/"scenes"\s*:\s*\[/.test(text) || /"sceneNumber"/.test(text)) {
-          return true;
-        }
-        
-        return false;
-      };
-
-      // Check if the prompt is already a script
-      if (isScriptFormat(projectData.prompt, videoDuration)) {
-        fastify.log.info({ projectId }, 'Prompt is already a script format, parsing directly');
-        
-        let scriptJson: any;
-        try {
-          scriptJson = JSON.parse(projectData.prompt);
-        } catch (parseError) {
-          // Try to extract JSON from markdown code blocks
-          const jsonMatch = projectData.prompt.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-          if (jsonMatch && jsonMatch[1]) {
-            try {
-              scriptJson = JSON.parse(jsonMatch[1]);
-            } catch (e) {
-              // Still not JSON, try to parse as text-based script
-              scriptJson = null;
-            }
-          } else {
-            // Not JSON, try to parse as text-based script format
-            scriptJson = null;
-          }
-        }
-
-        // If we successfully parsed a JSON script, validate and return it
-        if (scriptJson && scriptJson.scenes && Array.isArray(scriptJson.scenes)) {
-          // Extract intelligent params from script for video generation
-          const extractedParams: any = {};
-          
-          // Extract style, mood, and other parsed prompt info
-          if (scriptJson.parsedPrompt) {
-            if (scriptJson.parsedPrompt.style) extractedParams.style = scriptJson.parsedPrompt.style;
-            if (scriptJson.parsedPrompt.mood) extractedParams.mood = scriptJson.parsedPrompt.mood;
-            if (scriptJson.parsedPrompt.keyElements) extractedParams.keyElements = scriptJson.parsedPrompt.keyElements;
-            if (scriptJson.parsedPrompt.keywords) extractedParams.keywords = scriptJson.parsedPrompt.keywords;
-          }
-          
-          // Merge in params from dropdown (config)
-          if (config.style) extractedParams.style = config.style;
-          if (config.mood) extractedParams.mood = config.mood;
-          if (config.aspectRatio) extractedParams.aspectRatio = config.aspectRatio;
-          if (config.colorPalette) extractedParams.colorPalette = config.colorPalette;
-          if (config.pacing) extractedParams.pacing = config.pacing;
-          
-          // Use scene references to determine proper splitting
-          // If scenes already have timing info, use that; otherwise calculate evenly
-          let scenes = scriptJson.scenes;
-          const hasTiming = scenes.some((s: any) => s.startTime !== undefined && s.endTime !== undefined);
-          
-          if (!hasTiming) {
-            // Calculate timing based on scene durations or split evenly
-            let totalAllocated = 0;
-            scenes = scenes.map((scene: any, index: number) => {
-              const sceneDuration = scene.duration || (videoDuration / scenes.length);
-              const startTime = totalAllocated;
-              const endTime = startTime + sceneDuration;
-              totalAllocated = endTime;
-              
-              return {
-                sceneNumber: scene.sceneNumber || index + 1,
-                prompt: scene.prompt || '',
-                duration: sceneDuration,
-                startTime: startTime,
-                endTime: endTime,
-              };
-            });
-          } else {
-            // Use existing timing, but ensure all fields are present
-            scenes = scenes.map((scene: any, index: number) => ({
-              sceneNumber: scene.sceneNumber || index + 1,
-              prompt: scene.prompt || '',
-              duration: scene.duration || ((scene.endTime || 0) - (scene.startTime || 0)),
-              startTime: scene.startTime || 0,
-              endTime: scene.endTime || 0,
-            }));
-          }
-
-          // Ensure overallPrompt is set
-          scriptJson.overallPrompt = scriptJson.overallPrompt || projectData.prompt;
-          
-          // Update parsedPrompt with merged params
-          if (!scriptJson.parsedPrompt) scriptJson.parsedPrompt = {};
-          scriptJson.parsedPrompt = { ...scriptJson.parsedPrompt, ...extractedParams };
-          
-          // Update config with extracted params if they exist
-          if (Object.keys(extractedParams).length > 0) {
-            const updatedConfig = { ...config, ...extractedParams };
-            // Optionally update the project config in database
-            // await query('UPDATE projects SET config = $1 WHERE id = $2', [JSON.stringify(updatedConfig), projectId]);
-          }
-
-          return reply.send({
-            script: JSON.stringify(scriptJson, null, 2),
-            scenes: scenes,
-          });
-        }
-        
-        // If not JSON, try to parse as text-based script format
-        if (!scriptJson) {
-          fastify.log.info({ projectId }, 'Attempting to parse text-based script format');
-          
-          // Parse text-based script with numbered scenes
-          const textScript = projectData.prompt;
-          const scenes: any[] = [];
-          
-          // Split by scene markers (Scene 1, Scene 2, etc.)
-          const scenePattern = /(?:^|\n)\s*(?:Scene\s*[#:]?\s*(\d+)|(\d+)\.\s*Scene|Scene\s*Number\s*(\d+))/i;
-          const sceneMatches = [...textScript.matchAll(new RegExp(scenePattern.source, 'gim'))];
-          
-          if (sceneMatches.length > 0) {
-            // Extract scenes
-            for (let i = 0; i < sceneMatches.length; i++) {
-              const match = sceneMatches[i];
-              const sceneNum = parseInt(match[1] || match[2] || match[3] || String(i + 1));
-              const startPos = match.index! + match[0].length;
-              const endPos = i < sceneMatches.length - 1 ? sceneMatches[i + 1].index! : textScript.length;
-              const sceneText = textScript.substring(startPos, endPos).trim();
-              
-              // Extract duration from scene text
-              const durationMatch = sceneText.match(/duration\s*[=:]\s*(\d+(?:\.\d+)?)\s*(?:seconds?|sec)?/i);
-              const secondsMatch = sceneText.match(/(\d+(?:\.\d+)?)\s*seconds?/i);
-              let sceneDuration: number | undefined;
-              
-              if (durationMatch) {
-                sceneDuration = parseFloat(durationMatch[1]);
-              } else if (secondsMatch) {
-                sceneDuration = parseFloat(secondsMatch[1]);
-              }
-              
-              // Extract startTime and endTime if present
-              const startTimeMatch = sceneText.match(/startTime\s*[=:]\s*(\d+(?:\.\d+)?)/i);
-              const endTimeMatch = sceneText.match(/endTime\s*[=:]\s*(\d+(?:\.\d+)?)/i);
-              const startTime = startTimeMatch ? parseFloat(startTimeMatch[1]) : undefined;
-              const endTime = endTimeMatch ? parseFloat(endTimeMatch[1]) : undefined;
-              
-              // Clean up the prompt text (remove metadata lines)
-              let promptText = sceneText
-                .replace(/duration\s*[=:]\s*\d+(?:\.\d+)?\s*(?:seconds?|sec)?/gi, '')
-                .replace(/(\d+(?:\.\d+)?)\s*seconds?/gi, '')
-                .replace(/startTime\s*[=:]\s*\d+(?:\.\d+)?/gi, '')
-                .replace(/endTime\s*[=:]\s*\d+(?:\.\d+)?/gi, '')
-                .trim();
-              
-              scenes.push({
-                sceneNumber: sceneNum,
-                prompt: promptText,
-                duration: sceneDuration,
-                startTime: startTime,
-                endTime: endTime,
-              });
-            }
-          } else {
-            // Fallback: try to split by common delimiters
-            const sections = textScript.split(/\n\s*\n+/);
-            sections.forEach((section, index) => {
-              if (section.trim().length > 50) { // Only include substantial sections
-                scenes.push({
-                  sceneNumber: index + 1,
-                  prompt: section.trim(),
-                  duration: undefined,
-                  startTime: undefined,
-                  endTime: undefined,
-                });
-              }
-            });
-          }
-          
-          if (scenes.length > 0) {
-            fastify.log.info({ projectId, sceneCount: scenes.length }, 'Successfully parsed text-based script');
-            
-            // Calculate timing if not provided
-            let totalAllocated = 0;
-            const scenesWithTiming = scenes.map((scene, index) => {
-              let sceneDuration = scene.duration;
-              let startTime = scene.startTime;
-              let endTime = scene.endTime;
-              
-              if (!sceneDuration) {
-                // Distribute remaining time evenly
-                const remainingScenes = scenes.length - index;
-                const remainingTime = videoDuration - totalAllocated;
-                sceneDuration = remainingTime / remainingScenes;
-              }
-              
-              if (startTime === undefined) {
-                startTime = totalAllocated;
-              }
-              
-              if (endTime === undefined) {
-                endTime = startTime + sceneDuration;
-              }
-              
-              totalAllocated = endTime;
-              
-              return {
-                sceneNumber: scene.sceneNumber || index + 1,
-                prompt: scene.prompt,
-                duration: sceneDuration,
-                startTime: startTime,
-                endTime: endTime,
-              };
-            });
-            
-            // Build the script JSON structure
-            const parsedPrompt: any = {
-              duration: videoDuration,
-            };
-            
-            // Merge in params from dropdown (config)
-      if (config.style) parsedPrompt.style = config.style;
-      if (config.mood) parsedPrompt.mood = config.mood;
-            if (config.aspectRatio) parsedPrompt.aspectRatio = config.aspectRatio;
-            if (config.colorPalette) parsedPrompt.colorPalette = config.colorPalette;
-            if (config.pacing) parsedPrompt.pacing = config.pacing;
-            
-            // Extract key elements and keywords from the script text
-            const keyElements: string[] = [];
-            const keywords: string[] = [];
-            
-            // Simple extraction: look for common patterns
-            const allText = scenesWithTiming.map(s => s.prompt).join(' ');
-            const elementPatterns = [
-              /(?:a|an|the)\s+([a-z]+(?:\s+[a-z]+){0,2})\s+(?:calendar|book|watch|phone|laptop|table|chair|desk|pen|paper|picture|photo|frame|wall|door|window)/gi,
-            ];
-            
-            // Extract potential key elements (this is a simple heuristic)
-            const commonObjects = ['calendar', 'book', 'watch', 'phone', 'laptop', 'table', 'chair', 'desk'];
-            commonObjects.forEach(obj => {
-              if (allText.toLowerCase().includes(obj)) {
-                keyElements.push(obj);
-              }
-            });
-            
-            parsedPrompt.keyElements = keyElements.length > 0 ? keyElements : undefined;
-            parsedPrompt.keywords = keywords.length > 0 ? keywords : undefined;
-            
-            const scriptJson = {
-        overallPrompt: projectData.prompt,
-              parsedPrompt: parsedPrompt,
-              scenes: scenesWithTiming,
-            };
-            
-            return reply.send({
-              script: JSON.stringify(scriptJson, null, 2),
-              scenes: scenesWithTiming,
-            });
-          }
-        }
-      }
-
-      // If not a script, generate one using LLM
-      fastify.log.info({ projectId }, 'Prompt is context, generating script using LLM');
+      // Always generate script using LLM (no internal parsing)
+      fastify.log.info({ projectId }, 'Generating script using LLM');
       
       // Check if OpenRouter API key is configured
       const { config: appConfig } = await import('../config');
@@ -532,124 +215,83 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
         });
       }
 
-      // Build comprehensive prompt for elaborate script generation
-      const systemPrompt = `You are an expert video script writer specializing in creating highly detailed, elaborate video scripts for AI video generation. Your task is to create an extremely detailed script with approximately 10,000 words that breaks down a video concept into multiple scenes with rich, vivid descriptions.
+      // Calculate target script length based on input prompt length
+      // Minimum: 10,000 characters, otherwise match input length (unless explicitly asked for more)
+      const inputPromptLength = projectData.prompt?.length || 0;
+      const minLength = 10000;
+      const targetLength = Math.max(minLength, inputPromptLength);
+      const targetWords = Math.round(targetLength / 5); // Rough estimate: 5 chars per word
+      const targetCharsPerScene = Math.max(200, Math.round(targetLength / 5)); // Distribute across ~5 scenes
+      
+      // Check if user explicitly asked for a very long/elaborate script
+      const promptLower = projectData.prompt?.toLowerCase() || '';
+      const asksForLongScript = promptLower.includes('elaborate') || 
+                                promptLower.includes('detailed') || 
+                                promptLower.includes('comprehensive') ||
+                                promptLower.includes('extensive') ||
+                                promptLower.includes('10000') ||
+                                promptLower.includes('10,000') ||
+                                promptLower.includes('ten thousand');
+      
+      const finalTargetLength = asksForLongScript ? Math.max(targetLength, 50000) : targetLength;
+      const finalTargetWords = Math.round(finalTargetLength / 5);
+      const finalTargetCharsPerScene = Math.max(200, Math.round(finalTargetLength / 5));
+      
+      fastify.log.info({
+        projectId,
+        inputPromptLength,
+        minLength,
+        targetLength: finalTargetLength,
+        targetWords: finalTargetWords,
+        asksForLongScript,
+        targetCharsPerScene: finalTargetCharsPerScene,
+      }, 'Calculated target script length based on input');
 
-CRITICAL REQUIREMENTS:
-1. Generate approximately 10,000 words of detailed script content
-2. **INTELLIGENT SCENE SPLITTING**: Analyze the concept and identify natural scene breaks based on:
-   - Narrative flow and story progression
-   - Visual transitions and changes in setting/location
-   - Temporal changes (time of day, time progression)
-   - Character or object introductions
-   - Action sequences or key moments
-   - Emotional beats or mood shifts
-   Break the video into multiple scenes (typically 5-10 scenes for a ${videoDuration}-second video) based on these natural divisions
-3. **EXTRACT KEY ELEMENTS**: Identify and extract key visual elements, objects, characters, props, and recurring themes from the concept (e.g., calendar, books, specific clothing, objects, characters, locations, colors, textures). These elements must be consistently referenced across ALL scenes to maintain visual continuity.
-4. Each scene must have:
-   - Detailed visual descriptions (camera angles, movements, lighting, composition)
-   - Specific visual elements, colors, textures, and details
-   - **Consistent key elements** from the overall concept (characters, objects, props, colors, etc.)
-   - Precise timing (startTime and endTime in seconds) that adds up exactly to ${videoDuration} seconds
-   - Scene duration that matches the narrative importance and visual complexity
-   - Elaborate prompt descriptions suitable for AI video generation
-5. **PARSE INTELLIGENT PARAMS**: Extract and include in parsedPrompt:
-   - Style (visual style, cinematic style, artistic direction)
-   - Mood (emotional tone, atmosphere)
-   - Key elements array (all important objects, characters, props for consistency)
-   - Keywords (important visual and narrative keywords)
-6. **MAINTAIN CONSISTENCY**: Each scene prompt must reference the key elements extracted from the concept to ensure visual consistency throughout the video
-7. **SCENE REFERENCES**: If the concept mentions specific scenes, scene numbers, or scene breaks, use those as reference points for splitting
-8. Output MUST be valid JSON format matching the exact structure specified below
+      // Simplified system prompt - just request the JSON structure
+      const systemPrompt = `You are a video script writer. Create a detailed video script in JSON format.
 
-OUTPUT FORMAT (JSON):
+Generate approximately ${finalTargetWords} words (${finalTargetLength} characters) total. Break the video into multiple scenes (typically 5-10 scenes for a ${videoDuration}-second video).
+
+Each scene prompt should be detailed (approximately ${finalTargetCharsPerScene} characters) with visual descriptions, camera movements, lighting, and composition details.
+
+Output ONLY valid JSON in this exact format:
 {
   "overallPrompt": "The original user prompt",
   "parsedPrompt": {
-    "style": "Detailed style description",
-    "mood": "Detailed mood description",
+    "style": "Visual style description",
+    "mood": "Emotional tone",
     "duration": ${videoDuration},
-    "keywords": ["keyword1", "keyword2", ...],
-    "keyElements": ["element1", "element2", ...] // Extracted key visual elements, objects, characters, props
+    "keywords": ["keyword1", "keyword2"],
+    "keyElements": ["element1", "element2"]
   },
   "scenes": [
     {
       "sceneNumber": 1,
-      "prompt": "Extremely detailed, elaborate scene description (500-2000 words) with specific visual details, camera movements, lighting, colors, textures, composition, and all visual elements needed for AI video generation. MUST include references to key elements from the concept for consistency.",
+      "prompt": "Detailed scene description with visual details",
       "duration": X.X,
       "startTime": X.X,
       "endTime": X.X
-    },
-    ...
+    }
   ]
 }
 
-IMPORTANT: 
-- Each scene prompt should be extremely detailed and elaborate (500-2000 words each)
-- Total word count should be approximately 10,000 words
-- Scene durations must add up exactly to ${videoDuration} seconds
-- **Extract and list key visual elements** (objects, characters, props, colors, textures) from the concept
-- **Reference these key elements consistently** in each scene prompt to maintain visual continuity
-- Be creative, vivid, and specific in your descriptions
-- Focus on visual details that will help AI video generation models create stunning visuals
-- Ensure characters, objects, and visual elements remain consistent across all scenes`;
+Scene durations must add up to exactly ${videoDuration} seconds.`;
 
-      // Build comprehensive user prompt with all project context
-      const userPrompt = `Create an elaborate, detailed video script for the following concept:
+      // Simplified user prompt
+      const userPrompt = `Create a detailed video script for this concept:
 
-PROJECT DETAILS:
-- Category: ${projectData.category || 'General'}
-- Original Prompt: ${projectData.prompt}
-- Duration: ${videoDuration} seconds
-${config.style ? `- Style: ${config.style}` : ''}
-${config.mood ? `- Mood: ${config.mood}` : ''}
-${config.aspectRatio ? `- Aspect Ratio: ${config.aspectRatio}` : ''}
-${config.colorPalette ? `- Color Palette: ${config.colorPalette}` : ''}
-${config.pacing ? `- Pacing: ${config.pacing}` : ''}
-${config.constraints ? `- Constraints: ${config.constraints}` : ''}
+${projectData.prompt}
 
-CRITICAL INSTRUCTIONS:
-1. **Analyze Scene References**: If the concept mentions specific scenes, scene numbers, scene breaks, or natural divisions, use those as reference points for splitting. Pay attention to:
-   - Explicit scene mentions (e.g., "Scene 1:", "First scene", "Next scene")
-   - Natural narrative breaks or transitions
-   - Changes in location, time, or focus
-   - Visual or thematic shifts
+Duration: ${videoDuration} seconds
+${config.style ? `Style: ${config.style}` : ''}
+${config.mood ? `Mood: ${config.mood}` : ''}
 
-2. **Extract Key Elements**: Identify all key visual elements from the concept such as:
-   - Specific objects, props, or items (e.g., calendar, books, watch, specific clothing items)
-   - Characters and their consistent appearance/attributes
-   - Recurring visual themes, colors, or textures
-   - Locations or settings
-   - Any other elements that should remain consistent across scenes
-
-3. **Maintain Consistency**: Each scene must reference these key elements to ensure visual continuity. For example:
-   - If a character appears, maintain their consistent appearance, clothing, and attributes
-   - If specific objects (like a calendar or book) are mentioned, reference them consistently
-   - If specific colors or textures are key to the concept, include them in each scene
-
-4. **Intelligent Scene Splitting**: Break the concept into scenes based on:
-   - Natural narrative flow and story progression
-   - Visual transitions and setting changes
-   - Temporal progression (time of day, time passing)
-   - Character or object introductions
-   - Key moments or action sequences
-   - Emotional or mood shifts
-   If the concept already has scene divisions, respect and use those.
-
-5. **Parse Intelligent Params**: Extract and include in the parsedPrompt:
-   - Style: Visual/cinematic style from the concept or project settings
-   - Mood: Emotional tone and atmosphere
-   - Key elements: Array of all important objects, characters, props for consistency
-   - Keywords: Important visual and narrative keywords
-
-6. Generate an elaborate script with approximately 10,000 words, breaking this into multiple detailed scenes. Each scene should have rich, vivid descriptions perfect for AI video generation. Include specific details about camera movements, lighting, colors, textures, composition, and all visual elements.
-
-7. List all extracted key elements in the "keyElements" array in parsedPrompt so they can be referenced consistently across all scenes.`;
+Generate approximately ${finalTargetWords} words (${finalTargetLength} characters) total. Break into multiple scenes with detailed visual descriptions. Return ONLY valid JSON.`;
 
       // Call OpenRouter API with Claude Sonnet 4.5
-      // Add timeout to prevent hanging (5 minutes for large script generation)
+      // Add timeout to prevent hanging (3 minutes for large script generation)
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 minutes timeout
+      const timeoutId = setTimeout(() => controller.abort(), 3 * 60 * 1000); // 3 minutes timeout
       
       fastify.log.info({ projectId, promptLength: userPrompt.length }, 'Calling OpenRouter API for script generation');
       
@@ -664,13 +306,13 @@ CRITICAL INSTRUCTIONS:
             'X-Title': 'VidVerse AI Script Generator',
           },
           body: JSON.stringify({
-            model: 'anthropic/claude-3.5-sonnet', // Updated to correct model name
+            model: 'anthropic/claude-4.5-sonnet',
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: userPrompt },
             ],
-            temperature: 0.8,
-            max_tokens: 32000, // Dramatically increased to allow for very elaborate scripts (20,000+ words)
+            temperature: 0.7,
+            max_tokens: 32000, // Reduced from 100000 - most models have limits around 32k-64k tokens
           }),
           signal: controller.signal,
         });
@@ -678,7 +320,7 @@ CRITICAL INSTRUCTIONS:
       } catch (fetchError: any) {
         clearTimeout(timeoutId);
         if (fetchError.name === 'AbortError') {
-          fastify.log.error({ projectId }, 'OpenRouter API request timed out after 5 minutes');
+          fastify.log.error({ projectId }, 'OpenRouter API request timed out after 3 minutes');
           return reply.code(504).send({
             error: 'Script generation timed out',
             message: 'The script generation request took too long. Please try again with a shorter prompt or reduce the duration.',
@@ -694,11 +336,23 @@ CRITICAL INSTRUCTIONS:
       if (!openrouterResponse.ok) {
         const errorText = await openrouterResponse.text();
         let errorMessage = 'Failed to generate script. Please try again.';
+        let statusCode = 502;
         
         try {
           const errorData = JSON.parse(errorText);
           if (errorData.error?.message) {
             errorMessage = errorData.error.message;
+          }
+          // Check for common API issues
+          if (errorData.error?.code === 'insufficient_quota' || errorMessage.toLowerCase().includes('quota') || errorMessage.toLowerCase().includes('credit')) {
+            errorMessage = 'OpenRouter API quota/credits exhausted. Please check your account balance.';
+            statusCode = 402; // Payment Required
+          } else if (errorData.error?.code === 'invalid_api_key' || errorMessage.toLowerCase().includes('api key')) {
+            errorMessage = 'OpenRouter API key is invalid or expired.';
+            statusCode = 401;
+          } else if (errorData.error?.code === 'rate_limit' || errorMessage.toLowerCase().includes('rate limit')) {
+            errorMessage = 'OpenRouter API rate limit exceeded. Please try again later.';
+            statusCode = 429;
           }
         } catch {
           // Use default error message
@@ -706,11 +360,12 @@ CRITICAL INSTRUCTIONS:
 
         fastify.log.error({ 
           status: openrouterResponse.status,
-          error: errorText,
+          statusText: openrouterResponse.statusText,
+          error: errorText.substring(0, 500), // Limit error text length
           projectId 
         }, 'OpenRouter API error during script generation');
         
-        return reply.code(502).send({
+        return reply.code(statusCode).send({
           error: 'Script generation failed',
           message: errorMessage,
         });
@@ -726,6 +381,24 @@ CRITICAL INSTRUCTIONS:
       }
 
       const aiResponse = openrouterData.choices[0].message.content;
+      const finishReason = openrouterData.choices[0].finish_reason;
+      const usage = openrouterData.usage;
+      
+      // Log OpenRouter response metadata to diagnose truncation issues
+      fastify.log.info({
+        projectId,
+        finishReason,
+        usage: {
+          promptTokens: usage?.prompt_tokens,
+          completionTokens: usage?.completion_tokens,
+          totalTokens: usage?.total_tokens,
+        },
+        maxTokensRequested: 32000,
+        tokensUsed: usage?.completion_tokens || 0,
+        tokensRemaining: 32000 - (usage?.completion_tokens || 0),
+        wasTruncated: finishReason === 'length', // 'length' means hit token limit
+        wasStopped: finishReason === 'stop', // 'stop' means natural completion
+      }, 'OpenRouter API response metadata');
       
       if (!aiResponse || typeof aiResponse !== 'string') {
         fastify.log.error({ projectId, response: openrouterData }, 'Invalid AI response format');
@@ -735,162 +408,99 @@ CRITICAL INSTRUCTIONS:
         });
       }
 
-      fastify.log.info({ projectId, responseLength: aiResponse.length }, 'Received AI response, parsing JSON');
+      // Warn if response was truncated or is unexpectedly short
+      // Use the calculated target length (minimum 10,000, or input length, or 50000 if explicitly asked)
+      const expectedMinLength = Math.max(10000, Math.round(finalTargetLength * 0.8)); // Allow 20% tolerance
+      if (finishReason === 'length') {
+        fastify.log.warn({
+          projectId,
+          responseLength: aiResponse.length,
+          tokensUsed: usage?.completion_tokens,
+          maxTokens: 32000,
+          targetLength: finalTargetLength,
+        }, '⚠️ AI response was TRUNCATED - hit token limit. Response is incomplete!');
+      } else if (aiResponse.length < expectedMinLength) {
+        fastify.log.warn({
+          projectId,
+          responseLength: aiResponse.length,
+          expectedMinLength,
+          targetLength: finalTargetLength,
+          finishReason,
+          tokensUsed: usage?.completion_tokens,
+          difference: expectedMinLength - aiResponse.length,
+        }, `⚠️ AI response is SHORTER than expected (target: ${finalTargetLength} chars, got: ${aiResponse.length} chars). Model may not have followed instructions.`);
+      }
 
-      // Helper function to clean and fix JSON strings with control characters
-      const cleanJsonString = (jsonString: string): string => {
-        // First, try to extract JSON from markdown code blocks if present
-        const jsonMatch = jsonString.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-        let jsonToClean = jsonMatch ? jsonMatch[1] : jsonString;
-        
-        // Try to find JSON object boundaries if not in code block
-        if (!jsonMatch) {
-          const jsonObjectMatch = jsonString.match(/\{[\s\S]*\}/);
-          if (jsonObjectMatch) {
-            jsonToClean = jsonObjectMatch[0];
-          }
+      fastify.log.info({ 
+        projectId, 
+        responseLength: aiResponse.length,
+        responsePreview: aiResponse.substring(0, 500) + (aiResponse.length > 500 ? '...' : ''),
+        responseEnd: aiResponse.length > 500 ? '...' + aiResponse.substring(aiResponse.length - 500) : aiResponse,
+      }, 'Received AI response, parsing JSON');
+
+      // Simple function to extract JSON from markdown code blocks
+      const extractJsonFromMarkdown = (text: string): string | null => {
+        // Try to find markdown code blocks with json
+        // Match ```json or ``` followed by content and closing ```
+        // Use greedy match to get the full content between first and last ```
+        const markdownMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+        if (markdownMatch && markdownMatch[1]) {
+          return markdownMatch[1].trim();
         }
-        
-        // Fix control characters in JSON string values
-        // Process character by character to properly handle escaped sequences
-        let cleaned = '';
-        let inString = false;
-        let escapeNext = false;
-        
-        for (let i = 0; i < jsonToClean.length; i++) {
-          const char = jsonToClean[i];
-          const charCode = char.charCodeAt(0);
-          
-          if (escapeNext) {
-            // This character is escaped, keep it as-is
-            cleaned += char;
-            escapeNext = false;
-            continue;
-          }
-          
-          if (char === '\\') {
-            // Next character is escaped
-            escapeNext = true;
-            cleaned += char;
-            continue;
-          }
-          
-          if (char === '"') {
-            // Toggle string state
-            inString = !inString;
-            cleaned += char;
-            continue;
-          }
-          
-          if (inString) {
-            // We're inside a string value
-            // Escape control characters (0x00-0x1F except already escaped ones)
-            if (charCode >= 0x00 && charCode <= 0x1F) {
-              // Map control characters to their escape sequences
-              const escapeMap: Record<number, string> = {
-                0x08: '\\b',  // Backspace
-                0x09: '\\t',  // Tab
-                0x0A: '\\n',  // Newline
-                0x0C: '\\f',  // Form feed
-                0x0D: '\\r',  // Carriage return
-              };
-              
-              if (escapeMap[charCode]) {
-                cleaned += escapeMap[charCode];
-              } else {
-                // Use Unicode escape for other control characters
-                cleaned += `\\u${charCode.toString(16).padStart(4, '0')}`;
+        // Also try to find JSON object boundaries if markdown extraction fails
+        const firstBrace = text.indexOf('{');
+        if (firstBrace !== -1) {
+          let braceCount = 0;
+          let lastBrace = -1;
+          for (let i = firstBrace; i < text.length; i++) {
+            if (text[i] === '{') braceCount++;
+            if (text[i] === '}') {
+              braceCount--;
+              if (braceCount === 0) {
+                lastBrace = i;
+                break;
               }
-            } else {
-              cleaned += char;
             }
-          } else {
-            // Outside string, keep as-is
-            cleaned += char;
+          }
+          if (lastBrace !== -1) {
+            return text.substring(firstBrace, lastBrace + 1);
           }
         }
-        
-        return cleaned;
+        return null;
       };
 
       // Try to extract JSON from the response (it might be wrapped in markdown code blocks)
       let scriptJson: any;
-      try {
-        // Try to parse as-is first
-        scriptJson = JSON.parse(aiResponse);
-        fastify.log.info({ projectId }, 'Successfully parsed JSON directly from AI response');
-      } catch (parseError: any) {
-        fastify.log.warn({ projectId, parseError: parseError.message }, 'Direct JSON parse failed, trying to clean and fix JSON');
-        
+      
+      // Step 1: Try to extract from markdown code blocks first
+      const extractedFromMarkdown = extractJsonFromMarkdown(aiResponse);
+      if (extractedFromMarkdown) {
         try {
-          // Clean the JSON string to fix control characters
-          const cleanedJson = cleanJsonString(aiResponse);
-          scriptJson = JSON.parse(cleanedJson);
-          fastify.log.info({ projectId }, 'Successfully parsed JSON after cleaning control characters');
-        } catch (cleanError: any) {
-          fastify.log.warn({ projectId, error: cleanError.message }, 'Cleaned JSON parse failed, trying markdown extraction');
+          scriptJson = JSON.parse(extractedFromMarkdown);
+          fastify.log.info({ projectId, extractedLength: extractedFromMarkdown.length }, 'Successfully parsed JSON from markdown code block');
+        } catch (markdownError: any) {
+          fastify.log.warn({ projectId, error: markdownError.message }, 'Failed to parse JSON from markdown, trying direct parse');
+          // Fall through to try direct parse
+        }
+      }
+      
+      // Step 2: If markdown extraction failed or wasn't found, try direct parse
+      if (!scriptJson) {
+        try {
+          scriptJson = JSON.parse(aiResponse);
+          fastify.log.info({ projectId }, 'Successfully parsed JSON directly from AI response');
+        } catch (parseError: any) {
+          fastify.log.error({ 
+            projectId, 
+            error: parseError.message,
+            hasMarkdown: !!extractedFromMarkdown,
+            responsePreview: aiResponse.substring(0, 500),
+          }, 'Failed to parse JSON from AI response');
           
-          // Try to extract JSON from markdown code blocks
-          const jsonMatch = aiResponse.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-          if (jsonMatch && jsonMatch[1]) {
-            try {
-              const cleanedMarkdown = cleanJsonString(jsonMatch[1]);
-              scriptJson = JSON.parse(cleanedMarkdown);
-              fastify.log.info({ projectId }, 'Successfully parsed JSON from markdown code block after cleaning');
-            } catch (e: any) {
-              fastify.log.warn({ projectId, error: e.message }, 'Markdown extraction failed, trying regex match with cleaning');
-              
-              // If still fails, try to find JSON object in the text and clean it
-              const jsonObjectMatch = aiResponse.match(/\{[\s\S]*\}/);
-              if (jsonObjectMatch) {
-                try {
-                  const cleanedObject = cleanJsonString(jsonObjectMatch[0]);
-                  scriptJson = JSON.parse(cleanedObject);
-                  fastify.log.info({ projectId }, 'Successfully parsed JSON using regex match after cleaning');
-                } catch (regexError: any) {
-                  fastify.log.error({ 
-                    projectId, 
-                    error: regexError.message, 
-                    position: regexError.message.match(/position (\d+)/)?.[1],
-                    responsePreview: aiResponse.substring(0, 1000) 
-                  }, 'Failed to parse JSON from AI response after all cleaning attempts');
-                  
-                  // Try one more time with a more aggressive cleaning approach
-                  try {
-                    // Remove all control characters except those that are properly escaped
-                    let aggressiveClean = jsonObjectMatch[0];
-                    // Replace unescaped newlines, tabs, etc. in string values
-                    aggressiveClean = aggressiveClean.replace(/(?<!\\)"(?:[^"\\]|\\.)*"/g, (match) => {
-                      return match
-                        .replace(/\n/g, '\\n')
-                        .replace(/\r/g, '\\r')
-                        .replace(/\t/g, '\\t');
-                    });
-                    scriptJson = JSON.parse(aggressiveClean);
-                    fastify.log.info({ projectId }, 'Successfully parsed JSON using aggressive cleaning');
-                  } catch (finalError: any) {
-                    fastify.log.error({ projectId, error: finalError.message }, 'All JSON parsing attempts failed');
-                    return reply.code(502).send({
-                      error: 'Failed to parse script JSON',
-                      message: `Could not extract valid JSON from AI response. The response may contain invalid control characters. Error: ${finalError.message}`,
-                    });
-                  }
-                }
-              } else {
-                fastify.log.error({ projectId, responsePreview: aiResponse.substring(0, 500) }, 'No JSON object found in AI response');
-                return reply.code(502).send({
-                  error: 'Invalid script format',
-                  message: 'Could not extract JSON from AI response. The response may not contain valid JSON.',
-                });
-              }
-            }
-          } else {
-            fastify.log.error({ projectId, parseError: parseError.message, responsePreview: aiResponse.substring(0, 500) }, 'Failed to parse JSON and no markdown code block found');
-            return reply.code(502).send({
-              error: 'Failed to parse script JSON',
-              message: `Could not parse JSON from AI response: ${parseError.message}`,
-            });
-          }
+          return reply.code(502).send({
+            error: 'Failed to parse script JSON',
+            message: `Could not parse JSON from AI response. The response may be truncated or invalid. Error: ${parseError.message}`,
+          });
         }
       }
 
@@ -952,19 +562,35 @@ CRITICAL INSTRUCTIONS:
         type: 'object',
         properties: {
           useReferenceFrame: { type: 'boolean' },
+          continuous: { type: 'boolean' },
           videoModelId: { type: 'string' },
           aspectRatio: { type: 'string' },
           style: { type: 'string' },
           mood: { type: 'string' },
           colorPalette: { type: 'string' },
           pacing: { type: 'string' },
+          referenceImages: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+          assetIdToUrlMap: {
+            type: 'object',
+            additionalProperties: { type: 'string' },
+          },
         },
       },
     },
-  }, async (request: FastifyRequest<{ Params: { id: string }; Body?: { useReferenceFrame?: boolean; videoModelId?: string; aspectRatio?: string; style?: string; mood?: string; colorPalette?: string; pacing?: string } }>, reply: FastifyReply) => {
+  }, async (request: FastifyRequest<{ Params: { id: string }; Body?: { useReferenceFrame?: boolean; continuous?: boolean; videoModelId?: string; aspectRatio?: string; style?: string; mood?: string; colorPalette?: string; pacing?: string; referenceImages?: string[] } }>, reply: FastifyReply) => {
     const user = getCognitoUser(request);
     const { id: projectId } = request.params;
     const requestBody = request.body || {};
+
+    fastify.log.info({
+      projectId,
+      userId: user.sub,
+      hasReferenceImages: Array.isArray(requestBody.referenceImages) && requestBody.referenceImages.length > 0,
+      referenceImagesCount: Array.isArray(requestBody.referenceImages) ? requestBody.referenceImages.length : 0,
+    }, 'Video generation request received');
 
     // Verify project belongs to user
     const projectData = await queryOne(
@@ -973,6 +599,7 @@ CRITICAL INSTRUCTIONS:
     );
 
     if (!projectData) {
+      fastify.log.warn({ projectId, userId: user.sub }, 'Project not found for video generation');
       return reply.code(404).send({ error: 'Project not found' });
     }
 
@@ -986,12 +613,14 @@ CRITICAL INSTRUCTIONS:
       ...dbConfig,
       // Override with request body values if provided
       ...(requestBody.useReferenceFrame !== undefined && { useReferenceFrame: requestBody.useReferenceFrame }),
+      ...(requestBody.continuous !== undefined && { continuous: requestBody.continuous }),
       ...(requestBody.videoModelId !== undefined && { videoModelId: requestBody.videoModelId }),
       ...(requestBody.aspectRatio !== undefined && { aspectRatio: requestBody.aspectRatio }),
       ...(requestBody.style !== undefined && { style: requestBody.style }),
       ...(requestBody.mood !== undefined && { mood: requestBody.mood }),
       ...(requestBody.colorPalette !== undefined && { colorPalette: requestBody.colorPalette }),
       ...(requestBody.pacing !== undefined && { pacing: requestBody.pacing }),
+      ...(requestBody.referenceImages !== undefined && { referenceImages: requestBody.referenceImages }),
     };
 
     // Log config values for debugging
@@ -1027,6 +656,20 @@ CRITICAL INSTRUCTIONS:
       rawConfigType: typeof projectData.config,
     }, 'Starting synchronous video generation');
 
+    // Declare variables outside try block so they're accessible in catch block
+    let scenes: Array<{ sceneNumber: number; prompt: string; duration: number; startTime: number; endTime: number }> = [];
+    const sceneVideos: string[] = [];
+    const frameUrls: { first: string; last: string }[] = [];
+    let previousSceneLastFrameUrl: string | undefined = undefined; // Track last frame from previous scene
+    
+    // Load existing sceneVideoIds from config if available (for extending existing projects)
+    const existingSceneVideoIds = config.sceneVideoIds && Array.isArray(config.sceneVideoIds) 
+      ? config.sceneVideoIds 
+      : [];
+    const sceneVideoIds: Array<{ videoId?: string; videoObject?: any; videoUrl: string; gcsUri?: string }> = [...existingSceneVideoIds]; // Store video IDs/objects/GCS URIs for extension
+    let previousSceneVideoId: string | undefined = undefined; // Track video ID from previous scene for extension
+    let previousSceneVideoObject: any = undefined; // Track video object from previous scene for extension
+
     try {
       // Update project status to generating
       fastify.log.info({ projectId }, 'Step 0: Updating project status to "generating"');
@@ -1038,21 +681,32 @@ CRITICAL INSTRUCTIONS:
 
       // 1. Check if prompt is already a script, or parse/plan scenes
       const videoDuration = config.duration || 60;
-      let scenes: Array<{ sceneNumber: number; prompt: string; duration: number; startTime: number; endTime: number }>;
       let scriptParsedPrompt: any = {};
+      
+      // Check for script in multiple places:
+      // 1. config.script (where generated script is stored)
+      // 2. projectData.prompt (might contain the full script JSON)
+      const scriptText = config.script || projectData.prompt || '';
+      
+      // Check for script in config.script or projectData.prompt (NOT calling generate-script API)
       
       // Detect if the prompt is already a script
       const isScriptFormat = (text: string, duration: number): boolean => {
         if (!text || text.trim().length === 0) return false;
         
-        // Factor 1: Length-based detection
+        // Factor 1: Length-based detection (10000+ characters is likely a script)
+        if (text.length > 10000) {
+          return true;
+        }
+        
+        // Factor 2: Length-based detection (words per second)
         const wordCount = text.trim().split(/\s+/).length;
         const wordsPerSecond = wordCount / duration;
         if (wordsPerSecond >= 300) {
           return true;
         }
         
-        // Factor 2: Check for numbered scenes
+        // Factor 3: Check for numbered scenes
         const sceneNumberPatterns = [
           /scene\s+\d+/i,
           /scene\s*:\s*\d+/i,
@@ -1065,7 +719,7 @@ CRITICAL INSTRUCTIONS:
           return true;
         }
         
-        // Factor 3: Check for duration mentions in scenes
+        // Factor 4: Check for duration mentions in scenes
         const durationPatterns = [
           /duration\s*:\s*\d+/i,
           /duration\s*=\s*\d+/i,
@@ -1077,7 +731,7 @@ CRITICAL INSTRUCTIONS:
           return true;
         }
         
-        // Factor 4: Check for JSON structure
+        // Factor 5: Check for JSON structure
         try {
           const parsed = JSON.parse(text);
           if (parsed.scenes && Array.isArray(parsed.scenes)) {
@@ -1093,23 +747,24 @@ CRITICAL INSTRUCTIONS:
         return false;
       };
       
-      if (isScriptFormat(projectData.prompt, videoDuration)) {
-        fastify.log.info({ projectId }, 'Step 1-2: Prompt is a script, parsing directly');
-        
+      if (isScriptFormat(scriptText, videoDuration)) {
         // Parse script (same logic as generate-script endpoint)
+        // Use scriptText which could be from config.script or projectData.prompt
         let scriptJson: any;
         try {
-          scriptJson = JSON.parse(projectData.prompt);
+          scriptJson = JSON.parse(scriptText);
         } catch {
-          const jsonMatch = projectData.prompt.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+          const jsonMatch = scriptText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
           if (jsonMatch && jsonMatch[1]) {
             try {
               scriptJson = JSON.parse(jsonMatch[1]);
             } catch {
               scriptJson = null;
+              fastify.log.warn({ projectId }, 'Failed to parse script from markdown code block');
             }
           } else {
             scriptJson = null;
+            fastify.log.warn({ projectId }, 'Script text is not valid JSON and no markdown code block found');
           }
         }
         
@@ -1124,17 +779,122 @@ CRITICAL INSTRUCTIONS:
           if (config.colorPalette) scriptParsedPrompt.colorPalette = config.colorPalette;
           if (config.pacing) scriptParsedPrompt.pacing = config.pacing;
           
-          // Use scenes from script
-          scenes = scriptJson.scenes.map((scene: any, index: number) => ({
-            sceneNumber: scene.sceneNumber || index + 1,
-            prompt: scene.prompt || '',
-            duration: scene.duration || ((scene.endTime || 0) - (scene.startTime || 0)),
-            startTime: scene.startTime || 0,
-            endTime: scene.endTime || 0,
-          }));
+          // CRITICAL: Use the detailed scene prompts directly from the script JSON
+          // Each scene.prompt already contains the detailed description (1000+ chars) that should be sent to the API
+          scenes = scriptJson.scenes.map((scene: any, index: number) => {
+            const sceneNumber = scene.sceneNumber || index + 1;
+            const scenePrompt = scene.prompt || '';
+            
+            return {
+              sceneNumber: sceneNumber,
+              prompt: scenePrompt, // Use the detailed prompt directly from JSON
+              duration: scene.duration || ((scene.endTime || 0) - (scene.startTime || 0)),
+              startTime: scene.startTime || 0,
+              endTime: scene.endTime || 0,
+            };
+          });
+          
+          // Log summary of all scenes (single consolidated log)
+          fastify.log.info({
+            projectId,
+            scriptSource: config.script ? 'config.script' : 'projectData.prompt',
+            totalScenes: scenes.length,
+            totalPromptLength: scenes.reduce((sum, s) => sum + (s.prompt?.length || 0), 0),
+            averagePromptLength: Math.round(scenes.reduce((sum, s) => sum + (s.prompt?.length || 0), 0) / scenes.length),
+            scenePromptLengths: scenes.map(s => ({
+              sceneNumber: s.sceneNumber,
+              promptLength: s.prompt?.length || 0,
+            })),
+          }, 'Script parsed: Extracted scenes from script JSON');
+          
+          // Validate and adjust script duration if it exceeds target duration
+          const scriptTotalDuration = scenes.reduce((sum, scene) => sum + (scene.duration || 0), 0);
+          const durationDifference = scriptTotalDuration - videoDuration;
+          const durationRatio = scriptTotalDuration / videoDuration;
+          
+          if (durationDifference > 0.1) { // Allow small floating point differences
+            // Check if script is significantly longer (2x or more) - might need splitting
+            if (durationRatio >= 2.0) {
+              fastify.log.warn({
+                projectId,
+                scriptTotalDuration,
+                targetDuration: videoDuration,
+                durationRatio: durationRatio.toFixed(2),
+                sceneCount: scenes.length,
+                recommendation: 'Consider splitting script into multiple video generation calls to preserve scene durations',
+              }, `⚠️ Script duration (${scriptTotalDuration}s) is ${durationRatio.toFixed(1)}x longer than target (${videoDuration}s). This is a large difference - consider splitting into multiple calls.`);
+            }
+            
+            // Script duration exceeds target - scale down proportionally
+            // NOTE: Alternative approach would be to split into multiple video generation batches,
+            // but that requires more complex logic (multiple API calls, concatenation, etc.)
+            // For now, we scale proportionally to fit all scenes in one video
+            const scaleFactor = videoDuration / scriptTotalDuration;
+            fastify.log.warn({
+              projectId,
+              scriptTotalDuration,
+              targetDuration: videoDuration,
+              durationDifference,
+              scaleFactor,
+              sceneCount: scenes.length,
+              action: 'Scaling all scene durations proportionally to fit target duration',
+            }, `⚠️ Script duration (${scriptTotalDuration}s) exceeds target duration (${videoDuration}s). Scaling scene durations proportionally by factor ${scaleFactor.toFixed(3)}`);
+            
+            // Scale all scene durations proportionally
+            let adjustedStartTime = 0;
+            scenes = scenes.map((scene, index) => {
+              const adjustedDuration = (scene.duration || 0) * scaleFactor;
+              const adjustedStart = adjustedStartTime;
+              const adjustedEnd = adjustedStartTime + adjustedDuration;
+              adjustedStartTime = adjustedEnd;
+              
+              fastify.log.info({
+                projectId,
+                sceneNumber: scene.sceneNumber,
+                originalDuration: scene.duration,
+                adjustedDuration: adjustedDuration.toFixed(2),
+                originalStartTime: scene.startTime,
+                adjustedStartTime: adjustedStart.toFixed(2),
+                originalEndTime: scene.endTime,
+                adjustedEndTime: adjustedEnd.toFixed(2),
+              }, `Step 1-2: Scene ${scene.sceneNumber} duration adjusted to fit target duration`);
+              
+              return {
+                ...scene,
+                duration: adjustedDuration,
+                startTime: adjustedStart,
+                endTime: adjustedEnd,
+              };
+            });
+            
+            // Verify final duration
+            const finalTotalDuration = scenes.reduce((sum, scene) => sum + scene.duration, 0);
+            fastify.log.info({
+              projectId,
+              finalTotalDuration: finalTotalDuration.toFixed(2),
+              targetDuration: videoDuration,
+              difference: Math.abs(finalTotalDuration - videoDuration),
+            }, `Step 1-2: Final script duration after scaling: ${finalTotalDuration.toFixed(2)}s (target: ${videoDuration}s)`);
+          } else if (durationDifference < -0.1) {
+            // Script duration is less than target - log warning but don't adjust (might be intentional)
+            fastify.log.info({
+              projectId,
+              scriptTotalDuration,
+              targetDuration: videoDuration,
+              durationDifference: Math.abs(durationDifference),
+            }, `ℹ️ Script duration (${scriptTotalDuration}s) is less than target duration (${videoDuration}s). Using script durations as-is.`);
+          } else {
+            // Duration matches (within tolerance)
+            fastify.log.info({
+              projectId,
+              scriptTotalDuration,
+              targetDuration: videoDuration,
+            }, `✓ Script duration matches target duration: ${scriptTotalDuration.toFixed(2)}s`);
+          }
         } else {
           // Try to parse as text-based script
-          const textScript = projectData.prompt;
+          // Use scriptText (from config.script or projectData.prompt) instead of just projectData.prompt
+          const textScript = scriptText || projectData.prompt;
           const parsedScenes: any[] = [];
           
           const scenePattern = /(?:^|\n)\s*(?:Scene\s*[#:]?\s*(\d+)|(\d+)\.\s*Scene|Scene\s*Number\s*(\d+))/i;
@@ -1235,13 +995,7 @@ CRITICAL INSTRUCTIONS:
           }
         }
         
-        fastify.log.info({ 
-          projectId, 
-          sceneCount: scenes.length,
-          parsedStyle: scriptParsedPrompt.style,
-          parsedMood: scriptParsedPrompt.mood,
-          parsedAspectRatio: scriptParsedPrompt.aspectRatio,
-        }, 'Step 1-2: Script parsed successfully');
+        // Script parsing complete - scenes already logged above
       } else {
         // Normal flow: parse prompt and plan scenes
       fastify.log.info({ projectId, promptLength: projectData.prompt?.length || 0 }, 'Step 1: Parsing prompt');
@@ -1258,60 +1012,254 @@ CRITICAL INSTRUCTIONS:
       }, 'Step 1: Prompt parsed successfully');
 
         fastify.log.info({ projectId, duration: videoDuration }, 'Step 2: Planning scenes');
+        fastify.log.info({
+          projectId,
+          originalPrompt: projectData.prompt,
+          originalPromptLength: projectData.prompt?.length || 0,
+          originalPromptPreview: projectData.prompt?.substring(0, 500) + (projectData.prompt && projectData.prompt.length > 500 ? '...' : ''),
+        }, 'Step 2: Original prompt before scene planning');
         scenes = planScenes(projectData.prompt, parsedPrompt, videoDuration);
       fastify.log.info({ 
         projectId, 
         sceneCount: scenes.length,
+        originalPromptLength: projectData.prompt?.length || 0,
+        totalScenePromptLength: scenes.reduce((sum, s) => sum + (s.prompt?.length || 0), 0),
         scenes: scenes.map(s => ({ 
           number: s.sceneNumber, 
           duration: s.duration, 
-          promptLength: s.prompt?.length || 0 
+          promptLength: s.prompt?.length || 0,
+          promptPreview: s.prompt?.substring(0, 200) + (s.prompt && s.prompt.length > 200 ? '...' : ''),
         })),
-      }, 'Step 2: Scenes planned successfully');
+      }, 'Step 2: Scenes planned successfully - PROMPT LENGTH COMPARISON');
+      }
+
+      // 2.5. Generate reference images for Veo 3.1 based on script key details
+      // reference_images is separate from 'image' (first frame) and 'last_frame' (last frame)
+      // reference_images can contain multiple images (characters, artifacts, style references)
+      let referenceImagesUrls: string[] = []; // Array of reference image URLs for Veo 3.1
+      const selectedVideoModelId = config.videoModelId || 'google/veo-3.1';
+      const isVeo31 = selectedVideoModelId === 'google/veo-3.1' || selectedVideoModelId === 'google/veo-3';
+      
+      if (isVeo31 && scriptParsedPrompt) {
+        fastify.log.info({ projectId }, 'Step 2.5: Generating reference images for Veo 3.1 based on script key details');
+        
+        try {
+          // Extract key details from script
+          const keyElements = scriptParsedPrompt.keyElements || [];
+          const style = scriptParsedPrompt.style || config.style || '';
+          const mood = scriptParsedPrompt.mood || config.mood || '';
+          const aspectRatio = scriptParsedPrompt.aspectRatio || config.aspectRatio || '16:9';
+          
+          // Build context for reference image generation
+          // Use scriptText if available (contains full script with 10000+ chars), otherwise use projectData.prompt
+          const overallPrompt = scriptText || projectData.prompt || '';
+          
+          // Use Nano Banana via Replicate to generate reference images
+          const { generateImage } = await import('../services/replicate');
+          
+          // Create a comprehensive prompt for reference image generation
+          // If we have scenes from script, use those; otherwise use overallPrompt
+          const scriptSummary = scenes.length > 0 
+            ? scenes.map(s => `Scene ${s.sceneNumber}: ${s.prompt?.substring(0, 200)}...`).join('\n')
+            : overallPrompt.substring(0, 1000);
+          
+          // Generate multiple reference images:
+          // 1. Overall style/mood reference image
+          // 2. Individual images for key elements (characters, artifacts, etc.)
+          
+          // 1. Generate overall style reference image
+          const styleReferencePrompt = `Create a reference image for video generation that captures the overall visual style and mood.
+
+VIDEO SCRIPT CONTEXT:
+${scriptSummary}
+
+VISUAL STYLE: ${style || 'cinematic'}
+MOOD/ATMOSPHERE: ${mood || 'professional'}
+ASPECT RATIO: ${aspectRatio}
+
+INSTRUCTIONS:
+Generate a high-quality reference image that captures the overall visual aesthetic, color palette, lighting style, and mood that will be consistent across all ${scenes.length} scenes in this video. Focus on the visual style, composition, and atmosphere.`;
+          
+          fastify.log.info({
+            projectId,
+            keyElementsCount: keyElements.length,
+            style,
+            mood,
+          }, 'Step 2.5: Generating style reference image with Nano Banana');
+          
+          const styleImageResult = await generateImage({
+            prompt: styleReferencePrompt,
+            imageModelId: 'google/nano-banana',
+            aspectRatio: aspectRatio,
+          });
+          
+          if (styleImageResult.status === 'succeeded' && styleImageResult.output) {
+            const styleImageUrl = typeof styleImageResult.output === 'string' 
+              ? styleImageResult.output 
+              : (Array.isArray(styleImageResult.output) ? styleImageResult.output[0] : '');
+            
+            if (styleImageUrl) {
+              const imageResponse = await fetch(styleImageUrl);
+              const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+              
+              const { uploadFile } = await import('../services/storage');
+              const uploadResult = await uploadFile(
+                imageBuffer,
+                user.sub,
+                'frame',
+                'image/jpeg',
+                projectId,
+                'reference-style.jpg'
+              );
+              
+              referenceImagesUrls.push(uploadResult.url);
+              fastify.log.info({
+                projectId,
+                referenceImageUrl: uploadResult.url,
+                type: 'style reference',
+              }, 'Step 2.5: Style reference image generated and uploaded');
+            }
+          }
+          
+          // 2. Generate reference images for key elements (characters, artifacts, etc.)
+          // Limit to top 5 key elements to avoid too many images
+          const keyElementsToGenerate = keyElements.slice(0, 5);
+          
+          for (let i = 0; i < keyElementsToGenerate.length; i++) {
+            const element = keyElementsToGenerate[i];
+            
+            const elementReferencePrompt = `Create a reference image for a key visual element in a video.
+
+ELEMENT: ${element}
+
+VIDEO CONTEXT:
+${scriptSummary.substring(0, 500)}
+
+VISUAL STYLE: ${style || 'cinematic'}
+MOOD/ATMOSPHERE: ${mood || 'professional'}
+ASPECT RATIO: ${aspectRatio}
+
+INSTRUCTIONS:
+Generate a high-quality reference image that shows the "${element}" element. This image will be used as a reference to ensure this element appears consistently across all scenes in the video. Focus on the visual appearance, details, and characteristics of this specific element.`;
+            
+            try {
+              fastify.log.info({
+                projectId,
+                element,
+                elementIndex: i + 1,
+                totalElements: keyElementsToGenerate.length,
+              }, `Step 2.5: Generating reference image for element: ${element}`);
+              
+              const elementImageResult = await generateImage({
+                prompt: elementReferencePrompt,
+                imageModelId: 'google/nano-banana',
+                aspectRatio: aspectRatio,
+              });
+              
+              if (elementImageResult.status === 'succeeded' && elementImageResult.output) {
+                const elementImageUrl = typeof elementImageResult.output === 'string' 
+                  ? elementImageResult.output 
+                  : (Array.isArray(elementImageResult.output) ? elementImageResult.output[0] : '');
+                
+                if (elementImageUrl) {
+                  const imageResponse = await fetch(elementImageUrl);
+                  const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+                  
+                  const { uploadFile } = await import('../services/storage');
+                  const uploadResult = await uploadFile(
+                    imageBuffer,
+                    user.sub,
+                    'frame',
+                    'image/jpeg',
+                    projectId,
+                    `reference-element-${i + 1}-${element.replace(/[^a-z0-9]/gi, '-').toLowerCase()}.jpg`
+                  );
+                  
+                  referenceImagesUrls.push(uploadResult.url);
+                  fastify.log.info({
+                    projectId,
+                    element,
+                    referenceImageUrl: uploadResult.url,
+                  }, `Step 2.5: Reference image for element "${element}" generated and uploaded`);
+                }
+              }
+            } catch (elementError: any) {
+              fastify.log.warn({
+                projectId,
+                element,
+                error: elementError.message,
+              }, `Step 2.5: Failed to generate reference image for element "${element}", continuing...`);
+              // Continue with other elements
+            }
+          }
+          
+          fastify.log.info({
+            projectId,
+            totalReferenceImages: referenceImagesUrls.length,
+            referenceImageUrls: referenceImagesUrls.map(url => url.substring(0, 100) + '...'),
+          }, 'Step 2.5: Reference images generation completed - will be used in reference_images array for Veo 3.1');
+          
+        } catch (refImageError: any) {
+          fastify.log.error({
+            projectId,
+            error: refImageError.message,
+            stack: refImageError.stack,
+          }, 'Step 2.5: Error generating reference images, continuing without reference images');
+          // Continue without reference images - not critical
+        }
+      } else {
+        fastify.log.info({
+          projectId,
+          isVeo31,
+          hasScriptParsedPrompt: !!scriptParsedPrompt,
+          selectedVideoModelId,
+        }, 'Step 2.5: Skipping reference image generation (not Veo 3.1 or no script parsed prompt)');
       }
 
       // 3. Generate videos for each scene
       fastify.log.info({ projectId, totalScenes: scenes.length }, 'Step 3: Starting video generation for all scenes');
-      const sceneVideos: string[] = [];
-      const frameUrls: { first: string; last: string }[] = [];
-      let previousSceneLastFrameUrl: string | undefined = undefined; // Track last frame from previous scene
+      
+      // Clear arrays and reset reference frame in case of retry
+      sceneVideos.length = 0;
+      frameUrls.length = 0;
+      previousSceneLastFrameUrl = undefined; // Reset - will be set from last frame of each scene
 
       for (let i = 0; i < scenes.length; i++) {
         const scene = scenes[i];
         const sceneStartTime = Date.now();
-        fastify.log.info({ 
-          projectId, 
-          sceneNumber: scene.sceneNumber,
-          totalScenes: scenes.length,
-          scenePrompt: scene.prompt,
-          scenePromptPreview: scene.prompt?.substring(0, 150) + '...',
-          sceneDuration: scene.duration,
-          hasReferenceFrame: !!previousSceneLastFrameUrl,
-        }, `Step 3.${i + 1}: Generating video for scene ${scene.sceneNumber}/${scenes.length} with unique prompt`);
-
+        
         try {
           // Get the selected video model ID - use from config, fallback to default
           const selectedVideoModelId = config.videoModelId || 'google/veo-3.1';
-          
-          fastify.log.info({ 
-            projectId,
-            sceneNumber: scene.sceneNumber,
-            configVideoModelId: config.videoModelId,
-            selectedVideoModelId: selectedVideoModelId,
-            usingDefault: !config.videoModelId,
-          }, `Step 3.${i + 1}: Video model selection`);
           
           // Build video generation options
           const videoGenOptions: any = {
             prompt: scene.prompt,
             duration: scene.duration,
-            videoModelId: selectedVideoModelId, // Pass user's selected video model
-            aspectRatio: scriptParsedPrompt.aspectRatio || config.aspectRatio || '16:9', // Use from script or config
-            style: scriptParsedPrompt.style || config.style, // Use from script or config
-            mood: scriptParsedPrompt.mood || config.mood, // Use from script or config
-            colorPalette: scriptParsedPrompt.colorPalette || config.colorPalette, // Use from script or config
-            pacing: scriptParsedPrompt.pacing || config.pacing, // Use from script or config
+            videoModelId: selectedVideoModelId,
+            aspectRatio: scriptParsedPrompt.aspectRatio || config.aspectRatio || '16:9',
+            style: scriptParsedPrompt.style || config.style,
+            mood: scriptParsedPrompt.mood || config.mood,
+            colorPalette: scriptParsedPrompt.colorPalette || config.colorPalette,
+            pacing: scriptParsedPrompt.pacing || config.pacing,
           };
+          
+          // Add reference_images array for Veo 3.1
+          if (isVeo31 && referenceImagesUrls.length > 0) {
+            videoGenOptions.referenceImages = referenceImagesUrls;
+          }
+          
+          // Single consolidated log for scene generation
+          fastify.log.info({
+            projectId,
+            sceneNumber: scene.sceneNumber,
+            totalScenes: scenes.length,
+            promptLength: scene.prompt?.length || 0,
+            duration: scene.duration,
+            model: selectedVideoModelId,
+            hasReferenceFrame: !!previousSceneLastFrameUrl,
+            hasReferenceImages: isVeo31 && referenceImagesUrls.length > 0,
+          }, `Generating video for scene ${scene.sceneNumber}/${scenes.length}`);
           
           // Use last frame from previous scene as reference for smooth transitions
           // Only if useReferenceFrame is enabled (defaults to false - user must opt-in)
@@ -1319,48 +1267,63 @@ CRITICAL INSTRUCTIONS:
           const useReferenceFrameValue = config.useReferenceFrame;
           const shouldUseReferenceFrame = useReferenceFrameValue === true || useReferenceFrameValue === 'true' || useReferenceFrameValue === 1;
           
+          // Continuous mode: always pass last frame as image parameter (for seamless continuation)
+          const continuousValue = config.continuous;
+          const shouldUseContinuous = continuousValue === true || continuousValue === 'true' || continuousValue === 1;
+          
           fastify.log.info({ 
             projectId,
             sceneNumber: scene.sceneNumber,
             useReferenceFrameValue,
-            useReferenceFrameType: typeof useReferenceFrameValue,
+            continuousValue,
             shouldUseReferenceFrame,
+            shouldUseContinuous,
             hasPreviousFrame: !!previousSceneLastFrameUrl,
             isFirstScene: i === 0,
-          }, `Step 3.${i + 1}: Reference frame check - useReferenceFrame=${useReferenceFrameValue} (type: ${typeof useReferenceFrameValue}), shouldUse=${shouldUseReferenceFrame}`);
+          }, `Step 3.${i + 1}: Reference frame check - useReferenceFrame=${useReferenceFrameValue}, continuous=${continuousValue}`);
           
-          // Explicitly ensure reference frame parameters are not included when disabled
+          // Handle reference images for Veo 3.1
+          // For first scene (i === 0): use generated reference image if available
+          // For subsequent scenes (i > 0): use last frame from previous scene
           if (previousSceneLastFrameUrl && i > 0) {
-            if (shouldUseReferenceFrame) {
-              if (selectedVideoModelId === 'google/veo-3.1') {
-                videoGenOptions.lastFrame = previousSceneLastFrameUrl;
-                fastify.log.info({ 
-                  projectId, 
-                  sceneNumber: scene.sceneNumber,
-                  lastFrameUrl: previousSceneLastFrameUrl,
-                }, `Step 3.${i + 1}: Using last frame from scene ${i} as reference for Veo 3.1`);
-              } else {
-                // For other models (Veo 3, Veo 3 Fast, Sora 2, Kling), use image parameter
-                videoGenOptions.image = previousSceneLastFrameUrl;
-                fastify.log.info({ 
-                  projectId, 
-                  sceneNumber: scene.sceneNumber,
-                  referenceImageUrl: previousSceneLastFrameUrl,
-                }, `Step 3.${i + 1}: Using last frame from scene ${i} as reference image`);
-              }
+            if (shouldUseContinuous) {
+              // Continuous mode: always pass last frame as image parameter
+              videoGenOptions.image = previousSceneLastFrameUrl;
+              fastify.log.info({ 
+                projectId, 
+                sceneNumber: scene.sceneNumber,
+                referenceImageUrl: previousSceneLastFrameUrl,
+                model: selectedVideoModelId,
+              }, `Step 3.${i + 1}: Continuous mode enabled - using last frame from scene ${i} as image parameter for scene ${scene.sceneNumber}`);
+            } else if (shouldUseReferenceFrame) {
+              // For all models including Veo 3.1, use 'image' parameter for reference image
+              // For first scene: use generated reference image (if available)
+              // For subsequent scenes: use last frame from previous scene
+              videoGenOptions.image = previousSceneLastFrameUrl;
+              
+              const referenceType = i === 0 
+                ? 'generated reference image (from script key details)' 
+                : `last frame from scene ${i}`;
+              fastify.log.info({ 
+                projectId, 
+                sceneNumber: scene.sceneNumber,
+                referenceImageUrl: previousSceneLastFrameUrl,
+                referenceType,
+                model: selectedVideoModelId,
+              }, `Step 3.${i + 1}: Using ${referenceType} as reference image for scene ${scene.sceneNumber}`);
             } else {
-              // Explicitly ensure these are not set when useReferenceFrame is false
+              // Explicitly ensure these are not set when both are false
               delete videoGenOptions.lastFrame;
               delete videoGenOptions.image;
               fastify.log.info({ 
                 projectId, 
                 sceneNumber: scene.sceneNumber,
-              }, `Step 3.${i + 1}: Skipping reference frame (useReferenceFrame disabled) - not including in Replicate API call`);
+              }, `Step 3.${i + 1}: Skipping reference frame (useReferenceFrame and continuous disabled) - not including in Replicate API call`);
             }
           } else {
-            // Ensure these are not set for first scene or when no previous frame exists
-            delete videoGenOptions.lastFrame;
+            // Ensure these are not set when no reference image/frame exists
             delete videoGenOptions.image;
+            delete videoGenOptions.lastFrame; // Keep for backward compatibility, but not used
           }
           
           // Generate video for scene with all params from script and dropdown
@@ -1509,79 +1472,119 @@ CRITICAL INSTRUCTIONS:
             replicateUrl: videoUrl,
           }, `Step 3.${i + 1}.0: Downloading scene video from Replicate and uploading to S3`);
           
-          try {
-            const videoResponse = await fetch(videoUrl);
-            if (!videoResponse.ok) {
-              throw new Error(`Failed to download video from Replicate: ${videoResponse.statusText}`);
-            }
-            const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
-            fastify.log.info({ 
-              projectId, 
-              sceneNumber: scene.sceneNumber,
-              bufferSize: videoBuffer.length,
-            }, `Step 3.${i + 1}.0: Video downloaded, uploading to S3`);
-            
-            const sceneVideoUpload = await uploadGeneratedVideo(
-              videoBuffer,
-              user.sub,
-              projectId,
-              `scene-${scene.sceneNumber}.mp4`
-            );
-            
-            // Use S3 URL instead of Replicate URL
-            videoUrl = sceneVideoUpload.url;
-            fastify.log.info({ 
-              projectId, 
-              sceneNumber: scene.sceneNumber,
-              s3Url: videoUrl,
-            }, `Step 3.${i + 1}.0: Scene video uploaded to S3 successfully`);
-          } catch (uploadError: any) {
-            fastify.log.error({ 
-              projectId, 
-              sceneNumber: scene.sceneNumber,
-              error: uploadError.message,
-            }, `Step 3.${i + 1}.0: Failed to upload scene video to S3, using Replicate URL as fallback`);
-            // Continue with Replicate URL as fallback
+          // Download and upload to S3 - MANDATORY, no fallback
+          const videoResponse = await fetch(videoUrl);
+          if (!videoResponse.ok) {
+            throw new Error(`Failed to download video from Replicate: ${videoResponse.statusText}`);
           }
-          
-          sceneVideos.push(videoUrl);
-
-          // Extract frames
-          fastify.log.info({ projectId, sceneNumber: scene.sceneNumber }, `Step 3.${i + 1}.1: Extracting frames from scene ${scene.sceneNumber}`);
-          const frames = await extractFrames(videoUrl, user.sub, projectId, scene.sceneNumber);
+          const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
           fastify.log.info({ 
             projectId, 
             sceneNumber: scene.sceneNumber,
-            firstFrameUrl: frames.firstFrameUrl,
-            lastFrameUrl: frames.lastFrameUrl,
-          }, `Step 3.${i + 1}.1: Frames extracted successfully`);
-          frameUrls.push({ first: frames.firstFrameUrl, last: frames.lastFrameUrl });
+            bufferSize: videoBuffer.length,
+          }, `Step 3.${i + 1}.0: Video downloaded, uploading to S3`);
           
-          // Store last frame URL for next scene (use full S3 URL)
-          previousSceneLastFrameUrl = frames.lastFrameUrl;
-          fastify.log.info({ 
+          const sceneVideoUpload = await uploadGeneratedVideo(
+            videoBuffer,
+            user.sub,
             projectId,
+            `scene-${scene.sceneNumber}.mp4`
+          );
+          
+          // Use S3 URL instead of Replicate URL
+          videoUrl = sceneVideoUpload.url;
+          fastify.log.info({ 
+            projectId, 
             sceneNumber: scene.sceneNumber,
-            lastFrameUrl: previousSceneLastFrameUrl,
-            willUseForNextScene: i < scenes.length - 1,
-          }, `Step 3.${i + 1}.1: Stored last frame URL for next scene reference`);
+            s3Url: videoUrl,
+          }, `Step 3.${i + 1}.0: Scene video uploaded to S3 successfully`);
+          
+          sceneVideos.push(videoUrl);
 
-          // Store scene in database
+          // Store video ID/object/GCS URI for extension (Veo 3.1)
+          sceneVideoIds.push({
+            videoId: result.videoId,
+            videoObject: result.videoObject,
+            videoUrl: videoUrl,
+            gcsUri: result.gcsUri, // Store GCS URI for Veo 3.1
+          });
+          
+          // Determine asset_id based on model:
+          // - For Sora: use videoId
+          // - For Veo 3.1: use gcsUri
+          // - For images: NULL (handled separately)
+          let assetId: string | null = null;
+          const isSora = selectedVideoModelId?.startsWith('openai/sora');
+          const isVeo = selectedVideoModelId?.startsWith('google/veo');
+          
+          if (isSora && result.videoId) {
+            assetId = result.videoId;
+          } else if (isVeo && result.gcsUri) {
+            assetId = result.gcsUri;
+          }
+          
+          // Update previous scene video ID/object for next iteration
+          previousSceneVideoId = result.videoId;
+          previousSceneVideoObject = result.videoObject;
+          
+          fastify.log.info({ 
+            projectId, 
+            sceneNumber: scene.sceneNumber,
+            videoId: result.videoId || 'N/A',
+            gcsUri: result.gcsUri || 'N/A',
+            assetId: assetId || 'N/A',
+            model: selectedVideoModelId,
+            hasVideoObject: !!result.videoObject,
+            videoUrl: videoUrl.substring(0, 100) + '...',
+          }, `Step 3.${i + 1}: Stored video ID/object/GCS URI for extension`);
+
+          // Extract frames (non-blocking - if it fails, we still save the scene)
+          let frames: { firstFrameUrl: string; lastFrameUrl: string } | null = null;
+          fastify.log.info({ projectId, sceneNumber: scene.sceneNumber }, `Step 3.${i + 1}.1: Extracting frames from scene ${scene.sceneNumber}`);
+          try {
+            frames = await extractFrames(videoUrl, user.sub, projectId, scene.sceneNumber);
+            fastify.log.info({ 
+              projectId, 
+              sceneNumber: scene.sceneNumber,
+              firstFrameUrl: frames.firstFrameUrl,
+              lastFrameUrl: frames.lastFrameUrl,
+            }, `Step 3.${i + 1}.1: Frames extracted successfully`);
+            frameUrls.push({ first: frames.firstFrameUrl, last: frames.lastFrameUrl });
+            
+            // Store last frame URL for next scene (use full S3 URL)
+            previousSceneLastFrameUrl = frames.lastFrameUrl;
+            fastify.log.info({ 
+              projectId,
+              sceneNumber: scene.sceneNumber,
+              lastFrameUrl: previousSceneLastFrameUrl,
+              willUseForNextScene: i < scenes.length - 1,
+            }, `Step 3.${i + 1}.1: Stored last frame URL for next scene reference`);
+          } catch (frameError: any) {
+            fastify.log.warn({ 
+              projectId, 
+              sceneNumber: scene.sceneNumber,
+              error: frameError.message,
+            }, `Step 3.${i + 1}.1: Frame extraction failed, continuing without frames`);
+            // Continue without frames - video URL is more important
+          }
+
+          // Store scene in database (ALWAYS save video URL, even if frame extraction failed)
           fastify.log.info({ projectId, sceneNumber: scene.sceneNumber }, `Step 3.${i + 1}.2: Storing scene ${scene.sceneNumber} in database`);
           await query(
-            `INSERT INTO scenes (project_id, scene_number, prompt, duration, start_time, video_url, first_frame_url, last_frame_url)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            `INSERT INTO scenes (project_id, scene_number, prompt, duration, start_time, video_url, first_frame_url, last_frame_url, asset_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (project_id, scene_number) DO UPDATE
-             SET prompt = $3, duration = $4, start_time = $5, video_url = $6, first_frame_url = $7, last_frame_url = $8, updated_at = NOW()`,
+             SET prompt = $3, duration = $4, start_time = $5, video_url = $6, first_frame_url = $7, last_frame_url = $8, asset_id = $9, updated_at = NOW()`,
             [
               projectId,
               scene.sceneNumber,
               scene.prompt,
               scene.duration,
               scene.startTime,
-              videoUrl,
-              frames.firstFrameUrl,
-              frames.lastFrameUrl,
+              videoUrl, // Always save video URL - this is the critical data
+              frames?.firstFrameUrl || null, // NULL if frame extraction failed
+              frames?.lastFrameUrl || null, // NULL if frame extraction failed
+              assetId, // Save asset_id (videoId for Sora, gcsUri for Veo 3.1)
             ]
           );
           fastify.log.info({ projectId, sceneNumber: scene.sceneNumber }, `Step 3.${i + 1}.2: Scene ${scene.sceneNumber} stored successfully`);
@@ -1683,7 +1686,14 @@ CRITICAL INSTRUCTIONS:
       const updatedConfig = {
         ...config,
         videoUrl: uploadResult.url,
+        finalVideoUrl: uploadResult.url, // Also save as finalVideoUrl for frontend compatibility
         sceneUrls: sceneVideos,
+        sceneVideoIds: sceneVideoIds.map(item => ({
+          videoId: item.videoId,
+          videoUrl: item.videoUrl,
+          gcsUri: item.gcsUri, // Store GCS URI for Veo 3.1
+          // Note: videoObject is not stored in JSON (too large), only videoId, videoUrl, and gcsUri
+        })),
         frameUrls,
       };
 
@@ -1702,11 +1712,18 @@ CRITICAL INSTRUCTIONS:
       if (!verifyProject || !verifyProject.config) {
         fastify.log.error({ projectId }, 'Step 7: WARNING - Config was not saved to database');
       } else {
+        const savedConfig = typeof verifyProject.config === 'string' 
+          ? JSON.parse(verifyProject.config) 
+          : verifyProject.config;
         fastify.log.info({ 
           projectId, 
           configSaved: !!verifyProject.config,
-          hasVideoUrl: updatedConfig.videoUrl ? true : false
-        }, 'Step 7: Project updated successfully');
+          hasVideoUrl: !!savedConfig.videoUrl,
+          hasFinalVideoUrl: !!savedConfig.finalVideoUrl,
+          videoUrl: savedConfig.videoUrl || null,
+          finalVideoUrl: savedConfig.finalVideoUrl || null,
+          videoUrlLength: savedConfig.videoUrl ? savedConfig.videoUrl.length : 0,
+        }, 'Step 7: Project updated successfully - VIDEO URL SAVED');
       }
 
       // Cleanup temp files
@@ -1739,34 +1756,79 @@ CRITICAL INSTRUCTIONS:
         errorMessage: error?.message || 'No error message',
         errorStack: error?.stack || 'No stack trace',
         totalDuration,
+        scenesGenerated: sceneVideos.length,
+        totalScenes: scenes.length,
       }, 'ERROR: Synchronous video generation failed');
 
-      // Update project status to failed
+      // Update project status to failed, and store partial results if any scenes were generated
       try {
+        const currentConfig = typeof projectData.config === 'string' 
+          ? JSON.parse(projectData.config) 
+          : (projectData.config || {});
+        
+        // Store partial results if we have any successfully generated scenes
+        if (sceneVideos.length > 0) {
+          currentConfig.partialResults = {
+            scenesGenerated: sceneVideos.length,
+            totalScenes: scenes.length,
+            sceneUrls: sceneVideos,
+            frameUrls: frameUrls,
+            error: error.message || 'Video generation failed',
+            failedAtScene: sceneVideos.length + 1,
+          };
+          fastify.log.info({ 
+            projectId, 
+            scenesGenerated: sceneVideos.length,
+            totalScenes: scenes.length,
+          }, 'Storing partial results for failed generation');
+        }
+        
+        // Update status to failed and save config with partial results
         await query(
-          'UPDATE projects SET status = $1 WHERE id = $2',
-          ['failed', projectId]
+          'UPDATE projects SET status = $1, config = $2, updated_at = NOW() WHERE id = $3',
+          ['failed', JSON.stringify(currentConfig), projectId]
         );
-        fastify.log.info({ projectId }, 'Project status updated to "failed"');
+        
+        // Verify the update
+        const verifyProject = await queryOne(
+          'SELECT status, config FROM projects WHERE id = $1',
+          [projectId]
+        );
+        
+        if (verifyProject) {
+          fastify.log.info({ 
+            projectId, 
+            status: verifyProject.status,
+            hasPartialResults: !!(verifyProject.config && typeof verifyProject.config === 'object' ? verifyProject.config.partialResults : (typeof verifyProject.config === 'string' ? JSON.parse(verifyProject.config).partialResults : false)),
+          }, 'Project status updated to "failed" with partial results');
+        } else {
+          fastify.log.error({ projectId }, 'WARNING: Could not verify project status update');
+        }
       } catch (updateError: any) {
         fastify.log.error({ 
           err: updateError, 
-          projectId 
+          projectId,
+          updateErrorStack: updateError?.stack,
         }, 'ERROR: Failed to update project status to "failed"');
       }
 
       return reply.code(500).send({
         error: 'Video generation failed',
         message: error.message || 'An error occurred during video generation',
+        partialResults: sceneVideos.length > 0 ? {
+          scenesGenerated: sceneVideos.length,
+          totalScenes: scenes.length,
+          sceneUrls: sceneVideos,
+        } : undefined,
       });
     }
   });
 
-  // Stitch scenes together into final video
-  fastify.post('/projects/:id/stitch-scenes', {
+  // Generate a single scene video
+  fastify.post('/projects/:id/scenes/generate', {
     preHandler: [authenticateCognito],
     schema: {
-      description: 'Stitch scene videos together into final video',
+      description: 'Generate a single scene video',
       tags: ['projects'],
       params: {
         type: 'object',
@@ -1776,125 +1838,944 @@ CRITICAL INSTRUCTIONS:
       },
       body: {
         type: 'object',
-        properties: {},
+        required: ['prompt'],
+        properties: {
+          sceneIndex: { type: 'number' },
+          prompt: { type: 'string' },
+          videoModelId: { type: 'string' },
+          aspectRatio: { type: 'string' },
+          style: { type: 'string' },
+          mood: { type: 'string' },
+          colorPalette: { type: 'string' },
+          pacing: { type: 'string' },
+          referenceImages: {
+            type: 'array',
+            items: { type: 'string' },
+          },
+          previousSceneLastFrame: { type: 'string' },
+          previousSceneVideoUrl: { type: 'string' },
+          useReferenceFrame: { type: 'boolean' },
+          withAudio: { type: 'boolean' },
+        },
       },
     },
-  }, async (request: FastifyRequest<{ Params: { id: string }; Body?: { sceneUrls?: string[] } }>, reply: FastifyReply) => {
+  }, async (request: FastifyRequest<{ 
+    Params: { id: string }; 
+    Body: { 
+      sceneIndex?: number;
+      prompt: string;
+      videoModelId?: string;
+      aspectRatio?: string;
+      style?: string;
+      mood?: string;
+      colorPalette?: string;
+      pacing?: string;
+      referenceImages?: string[];
+      previousSceneLastFrame?: string;
+      previousSceneVideoUrl?: string;
+      useReferenceFrame?: boolean;
+      continuous?: boolean;
+      withAudio?: boolean;
+    } 
+  }>, reply: FastifyReply) => {
     const user = getCognitoUser(request);
     const { id: projectId } = request.params;
-    const body = request.body || {};
+    const requestBody = request.body;
+
+    // Verify project belongs to user
+    const { query } = await import('../services/database');
+    const project = await query(
+      'SELECT * FROM projects WHERE id = $1 AND user_id = $2',
+      [projectId, user.sub]
+    );
+
+    if (!project || project.length === 0) {
+      return reply.code(404).send({ error: 'Project not found' });
+    }
+
+    try {
+      const { generateVideo } = await import('../services/replicate');
+      const { extractFrames } = await import('../services/videoProcessor');
+      const { uploadGeneratedVideo } = await import('../services/storage');
+      const config = project[0].config || {};
+
+      // Get video model ID (from request or config or default)
+      const selectedVideoModelId = requestBody.videoModelId || config.videoModelId || 'google/veo-3.1';
+      const isVeo31 = selectedVideoModelId.startsWith('google/veo-3.1');
+
+      // Always use 16:9 aspect ratio for all models
+      const aspectRatio = '16:9';
+      
+      // Calculate aspect ratio dimensions for non-Veo models
+      let calculatedWidth: number | undefined;
+      let calculatedHeight: number | undefined;
+      
+      if (!isVeo31) {
+        const [width, height] = aspectRatio.split(':').map(Number);
+        const aspectRatioMultiplier = 64; // Base multiplier for dimensions
+        calculatedWidth = width * aspectRatioMultiplier;
+        calculatedHeight = height * aspectRatioMultiplier;
+      }
+
+      // Build video generation options
+      const videoGenOptions: any = {
+        prompt: requestBody.prompt,
+        duration: 8, // 8 seconds for single scene (Veo 3.1 supports 4, 6, or 8)
+        videoModelId: selectedVideoModelId,
+        aspectRatio: '16:9', // Always use 16:9
+        style: requestBody.style || config.style,
+        mood: requestBody.mood || config.mood,
+        colorPalette: requestBody.colorPalette || config.colorPalette,
+        pacing: requestBody.pacing || config.pacing,
+        withAudio: requestBody.withAudio !== false, // Default to true, allow override
+      };
+
+      // Add dimensions for non-Veo models
+      if (!isVeo31) {
+        videoGenOptions.width = calculatedWidth;
+        videoGenOptions.height = calculatedHeight;
+      }
+
+      // IMPORTANT: Veo 3.1 doesn't support both 'video' (extendPrevious) and 'reference_images' together
+      // Check if we're extending previous video first
+      const isExtendingPrevious = !!requestBody.previousSceneVideoUrl;
+      
+      // Add previous scene video URL if provided (for extending previous video)
+      // When extendPrevious is checked, we always use the previous video URL regardless of useReferenceFrame setting
+      fastify.log.info({
+        projectId,
+        sceneIndex: requestBody.sceneIndex,
+        hasPreviousVideoUrl: !!requestBody.previousSceneVideoUrl,
+        previousVideoUrl: requestBody.previousSceneVideoUrl ? requestBody.previousSceneVideoUrl.substring(0, 100) + '...' : 'N/A',
+        hasPreviousLastFrame: !!requestBody.previousSceneLastFrame,
+        useReferenceFrame: requestBody.useReferenceFrame,
+        hasReferenceImages: !!requestBody.referenceImages && requestBody.referenceImages.length > 0,
+      }, 'Checking for previous scene video/frame for extension');
+      
+      if (requestBody.previousSceneVideoUrl) {
+        // Always use video URL if provided (when extendPrevious is checked)
+        videoGenOptions.video = requestBody.previousSceneVideoUrl;
+        fastify.log.info({
+          projectId,
+          sceneIndex: requestBody.sceneIndex,
+          previousVideoUrl: requestBody.previousSceneVideoUrl.substring(0, 100) + '...',
+          model: selectedVideoModelId,
+          videoGenOptionsVideo: videoGenOptions.video?.substring(0, 100) + '...',
+        }, 'Using previous scene video URL for extension - added to videoGenOptions.video');
+        
+        // Don't add reference_images when using video parameter (Veo 3.1 doesn't support both)
+        if (requestBody.referenceImages && requestBody.referenceImages.length > 0) {
+          fastify.log.warn({
+            projectId,
+            sceneIndex: requestBody.sceneIndex,
+            referenceImagesCount: requestBody.referenceImages.length,
+          }, 'Skipping reference_images because extendPrevious is true (Veo 3.1 doesn\'t support both video and reference_images)');
+        }
+      } else {
+        // Only add reference images if NOT extending previous video
+        // Veo 3.1 doesn't support both 'video' and 'reference_images' together
+        if (requestBody.referenceImages && requestBody.referenceImages.length > 0) {
+          videoGenOptions.referenceImages = requestBody.referenceImages;
+          fastify.log.info({
+            projectId,
+            sceneIndex: requestBody.sceneIndex,
+            referenceImagesCount: requestBody.referenceImages.length,
+            referenceImages: requestBody.referenceImages,
+            model: selectedVideoModelId,
+          }, 'Using reference images for scene generation (extendPrevious is false)');
+        }
+        
+        // Add image parameter for continuous/reference frame mode
+        if (requestBody.previousSceneLastFrame && (requestBody.continuous || requestBody.useReferenceFrame)) {
+          // Use last frame as image parameter if continuous is enabled OR useReferenceFrame is enabled
+          videoGenOptions.image = requestBody.previousSceneLastFrame;
+          const mode = requestBody.continuous ? 'continuous' : 'useReferenceFrame';
+          fastify.log.info({
+            projectId,
+            sceneIndex: requestBody.sceneIndex,
+            previousLastFrame: requestBody.previousSceneLastFrame.substring(0, 100) + '...',
+            model: selectedVideoModelId,
+            mode,
+            hasImage: !!videoGenOptions.image,
+          }, `Using previous scene last frame as image parameter (${mode} mode)`);
+        } else if (requestBody.continuous && !requestBody.previousSceneLastFrame) {
+          // Continuous mode enabled but no previous frame available yet (first scene or frame not extracted)
+          fastify.log.warn({
+            projectId,
+            sceneIndex: requestBody.sceneIndex,
+            continuous: requestBody.continuous,
+            hasPreviousLastFrame: !!requestBody.previousSceneLastFrame,
+          }, 'Continuous mode enabled but previous scene last frame not available - skipping image parameter');
+        } else {
+          fastify.log.info({
+            projectId,
+            sceneIndex: requestBody.sceneIndex,
+            continuous: requestBody.continuous,
+            useReferenceFrame: requestBody.useReferenceFrame,
+            hasPreviousVideoUrl: !!requestBody.previousSceneVideoUrl,
+            hasPreviousLastFrame: !!requestBody.previousSceneLastFrame,
+            reason: !requestBody.previousSceneVideoUrl && !requestBody.previousSceneLastFrame ? 'no previous video/frame provided' : (!requestBody.previousSceneLastFrame && !requestBody.useReferenceFrame && !requestBody.continuous ? 'no video URL and both flags are false' : 'unknown'),
+          }, 'Not using previous scene video/frame for extension');
+        }
+      }
+
+      fastify.log.info({
+        projectId,
+        sceneIndex: requestBody.sceneIndex,
+        promptLength: requestBody.prompt.length,
+        model: selectedVideoModelId,
+        hasReferenceImages: requestBody.referenceImages && requestBody.referenceImages.length > 0,
+        referenceImagesCount: requestBody.referenceImages?.length || 0,
+        hasPreviousVideo: !!requestBody.previousSceneVideoUrl && requestBody.useReferenceFrame,
+        hasReferenceFrame: !!requestBody.previousSceneLastFrame && requestBody.useReferenceFrame,
+        videoGenOptionsHasVideo: !!videoGenOptions.video,
+        videoGenOptionsHasImage: !!videoGenOptions.image,
+        videoGenOptionsVideo: videoGenOptions.video ? (typeof videoGenOptions.video === 'string' ? videoGenOptions.video.substring(0, 100) + '...' : 'object') : 'N/A',
+      }, 'Generating single scene video - calling Replicate API with videoGenOptions');
+
+      // Generate video
+      const generateStartTime = Date.now();
+      const result = await generateVideo(videoGenOptions);
+      const generateDuration = Date.now() - generateStartTime;
+      
+      fastify.log.info({
+        projectId,
+        sceneIndex: requestBody.sceneIndex,
+        status: result.status,
+        duration: generateDuration,
+        hasOutput: !!result.output,
+        outputType: typeof result.output,
+      }, 'Replicate API call completed');
+
+      if (result.status === 'failed') {
+        return reply.code(500).send({ 
+          error: 'Video generation failed',
+          message: result.error 
+        });
+      }
+
+      // Handle different output formats
+      let videoUrl: string;
+      if (Array.isArray(result.output)) {
+        videoUrl = result.output[0];
+      } else if (typeof result.output === 'string') {
+        videoUrl = result.output;
+      } else {
+        throw new Error(`Unexpected output format from Replicate: ${typeof result.output}`);
+      }
+
+      // Download and upload to S3
+      const videoResponse = await fetch(videoUrl);
+      if (!videoResponse.ok) {
+        throw new Error(`Failed to download video from Replicate: ${videoResponse.statusText}`);
+      }
+      const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+      
+      const sceneNumber = (requestBody.sceneIndex ?? 0) + 1;
+      const sceneVideoUpload = await uploadGeneratedVideo(
+        videoBuffer,
+        user.sub,
+        projectId,
+        `scene-${sceneNumber}.mp4`
+      );
+      videoUrl = sceneVideoUpload.url;
+
+      // Extract frames
+      const frames = await extractFrames(videoUrl, user.sub, projectId, sceneNumber);
+
+      // Save scene to database
+      try {
+        const { query } = await import('../services/database');
+        const existingScene = await query(
+          'SELECT id FROM scenes WHERE project_id = $1 AND scene_number = $2',
+          [projectId, sceneNumber]
+        );
+
+        if (existingScene && existingScene.length > 0) {
+          // Update existing scene
+          const sceneDuration = 8; // Default duration for single scene
+          const startTime = (sceneNumber - 1) * 8; // Calculate start time
+          await query(
+            `UPDATE scenes 
+             SET prompt = $1, duration = $2, start_time = $3, video_url = $4, first_frame_url = $5, last_frame_url = $6, updated_at = NOW()
+             WHERE project_id = $7 AND scene_number = $8`,
+            [requestBody.prompt, sceneDuration, startTime, videoUrl, frames.firstFrameUrl, frames.lastFrameUrl, projectId, sceneNumber]
+          );
+          fastify.log.info({ 
+            projectId, 
+            sceneNumber, 
+            sceneIndex: requestBody.sceneIndex,
+            videoUrl: videoUrl.substring(0, 100) + '...',
+            hasFirstFrame: !!frames.firstFrameUrl,
+            hasLastFrame: !!frames.lastFrameUrl,
+          }, 'Updated existing scene in database');
+        } else {
+          // Insert new scene
+          const startTime = (sceneNumber - 1) * 8; // 8 seconds per scene
+          await query(
+            `INSERT INTO scenes (project_id, scene_number, prompt, duration, start_time, video_url, first_frame_url, last_frame_url)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [projectId, sceneNumber, requestBody.prompt, 8, startTime, videoUrl, frames.firstFrameUrl, frames.lastFrameUrl]
+          );
+          fastify.log.info({ 
+            projectId, 
+            sceneNumber,
+            sceneIndex: requestBody.sceneIndex,
+            videoUrl: videoUrl.substring(0, 100) + '...',
+            hasFirstFrame: !!frames.firstFrameUrl,
+            hasLastFrame: !!frames.lastFrameUrl,
+          }, 'Inserted new scene into database');
+        }
+      } catch (dbError: any) {
+        fastify.log.error({ 
+          projectId, 
+          sceneNumber, 
+          error: dbError.message,
+          stack: dbError.stack,
+        }, 'Failed to save scene to database');
+        // Don't fail the request, but log the error
+      }
+
+      fastify.log.info({
+        projectId,
+        sceneIndex: requestBody.sceneIndex,
+        videoUrl,
+        firstFrameUrl: frames.firstFrameUrl,
+        lastFrameUrl: frames.lastFrameUrl,
+      }, 'Single scene generated successfully');
+
+      return {
+        videoUrl,
+        firstFrameUrl: frames.firstFrameUrl,
+        lastFrameUrl: frames.lastFrameUrl,
+      };
+    } catch (error: any) {
+      fastify.log.error({ projectId, error: error.message }, 'Failed to generate single scene');
+      return reply.code(500).send({ 
+        error: 'Scene generation failed',
+        message: error.message 
+      });
+    }
+  });
+
+  // Generate all scenes and stitch into final video
+  fastify.post('/projects/:id/scenes/generate-all', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Generate all scenes sequentially or in parallel, then stitch into final video',
+      tags: ['projects'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+        },
+      },
+      body: {
+        type: 'object',
+        properties: {
+          scenes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                sceneIndex: { type: 'number' },
+                prompt: { type: 'string' },
+                selectedAssetIds: { type: 'array', items: { type: 'string' } },
+                extendPrevious: { type: 'boolean' },
+              },
+            },
+          },
+          parallel: { type: 'boolean' },
+          continuous: { type: 'boolean' },
+          useReferenceFrame: { type: 'boolean' },
+          videoModelId: { type: 'string' },
+          aspectRatio: { type: 'string' },
+          style: { type: 'string' },
+          mood: { type: 'string' },
+          colorPalette: { type: 'string' },
+          pacing: { type: 'string' },
+          referenceImages: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+  }, async (request: FastifyRequest<{ 
+    Params: { id: string }; 
+    Body: { 
+      scenes: Array<{ sceneIndex: number; prompt: string; selectedAssetIds: string[]; extendPrevious: boolean }>;
+      parallel: boolean;
+      continuous: boolean;
+      useReferenceFrame: boolean;
+      videoModelId?: string;
+      aspectRatio?: string;
+      style?: string;
+      mood?: string;
+      colorPalette?: string;
+      pacing?: string;
+          referenceImages?: string[];
+          assetIdToUrlMap?: Record<string, string>;
+        } 
+      }>, reply: FastifyReply) => {
+    const user = getCognitoUser(request);
+    const { id: projectId } = request.params;
+    const requestBody = request.body;
 
     try {
       // Verify project belongs to user
-      const projectData = await queryOne(
+      const project = await queryOne(
         'SELECT * FROM projects WHERE id = $1 AND user_id = $2',
         [projectId, user.sub]
       );
 
-      if (!projectData) {
+      if (!project) {
         return reply.code(404).send({ error: 'Project not found' });
       }
 
-      // Use provided sceneUrls or get from database
-      let sceneVideos: string[];
-      if (body.sceneUrls && body.sceneUrls.length > 0) {
-        sceneVideos = body.sceneUrls;
-      } else {
-        // Get scenes with video URLs from database
-        const scenes = await query(
-          `SELECT id, scene_number, video_url 
-           FROM scenes 
-           WHERE project_id = $1 AND video_url IS NOT NULL AND video_url != ''
-           ORDER BY scene_number ASC`,
-          [projectId]
-        );
+      const config = typeof project.config === 'string' 
+        ? JSON.parse(project.config) 
+        : (project.config || {});
 
-        if (scenes.length === 0) {
-          fastify.log.warn({ projectId }, 'No scenes with video URLs found for stitching');
-          return reply.code(400).send({ 
-            error: 'No scenes with video URLs found',
-            message: 'Please ensure all scenes have been generated and have video URLs before stitching.'
-          });
+      const { generateVideo } = await import('../services/replicate');
+      const { extractFrames } = await import('../services/videoProcessor');
+      const { uploadGeneratedVideo } = await import('../services/storage');
+      const { concatenateVideos } = await import('../services/videoProcessor');
+      const { query: queryDb } = await import('../services/database');
+
+      const selectedVideoModelId = requestBody.videoModelId || config.videoModelId || 'google/veo-3.1';
+      const isVeo31 = selectedVideoModelId.startsWith('google/veo-3.1');
+      const aspectRatio = '16:9';
+
+      // Generate all scenes
+      const sceneResults: Array<{ videoUrl: string; firstFrameUrl?: string; lastFrameUrl?: string }> = [];
+      let previousSceneLastFrameUrl: string | undefined = undefined;
+
+      if (requestBody.parallel) {
+        // Parallel generation - all at once
+        fastify.log.info({ projectId, sceneCount: requestBody.scenes.length }, 'Generating all scenes in parallel');
+        
+        const generationPromises = requestBody.scenes.map(async (sceneData, i) => {
+          const sceneIndex = sceneData.sceneIndex; // Now 1-based (1, 2, 3, 4, 5)
+          const sceneNumber = sceneIndex; // sceneIndex IS the scene_number now (1-based)
+          const previousScene = i > 0 ? requestBody.scenes[i - 1] : null;
+          
+          // Get previous scene's last frame if continuous is enabled
+          let previousLastFrame: string | undefined = undefined;
+          if (i > 0 && requestBody.continuous && previousSceneLastFrameUrl) {
+            previousLastFrame = previousSceneLastFrameUrl;
+          }
+
+          // Build video generation options
+          const videoGenOptions: any = {
+            prompt: sceneData.prompt,
+            duration: 8,
+            videoModelId: selectedVideoModelId,
+            aspectRatio,
+            style: requestBody.style || config.style,
+            mood: requestBody.mood || config.mood,
+            colorPalette: requestBody.colorPalette || config.colorPalette,
+            pacing: requestBody.pacing || config.pacing,
+            withAudio: true,
+          };
+
+          // IMPORTANT: Veo 3.1 doesn't support both 'video' (extendPrevious) and 'reference_images' together
+          // If extendPrevious is true, we can't use reference_images
+          // Note: In parallel mode, extendPrevious won't work because we don't have previous videos yet
+          // But we still need to check to avoid sending conflicting parameters
+          if (sceneData.extendPrevious && i > 0) {
+            // extendPrevious requires previous video URL, which we don't have in parallel mode
+            // Log warning and skip extendPrevious in parallel mode
+            fastify.log.warn({
+              projectId,
+              sceneIndex,
+              extendPrevious: sceneData.extendPrevious,
+              mode: 'parallel',
+            }, 'extendPrevious is not supported in parallel mode - skipping video parameter');
+          }
+
+          // Only add reference_images if extendPrevious is NOT true
+          // Veo 3.1 doesn't support video + reference_images together
+          // Filter reference images based on this scene's selectedAssetIds
+          if (!sceneData.extendPrevious && sceneData.selectedAssetIds && sceneData.selectedAssetIds.length > 0 && requestBody.assetIdToUrlMap) {
+            // Map selected asset IDs to URLs for this specific scene
+            const sceneReferenceImages = sceneData.selectedAssetIds
+              .map(assetId => requestBody.assetIdToUrlMap[assetId])
+              .filter(url => url !== undefined) as string[];
+            
+            if (sceneReferenceImages.length > 0) {
+              videoGenOptions.referenceImages = sceneReferenceImages;
+              fastify.log.info({
+                projectId,
+                sceneIndex,
+                selectedAssetIds: sceneData.selectedAssetIds,
+                referenceImagesCount: sceneReferenceImages.length,
+                referenceImageUrls: sceneReferenceImages.map(url => url.substring(0, 100) + '...'),
+              }, 'Adding reference_images for scene based on selectedAssetIds (extendPrevious is false)');
+            }
+          } else if (sceneData.extendPrevious && sceneData.selectedAssetIds && sceneData.selectedAssetIds.length > 0) {
+            fastify.log.warn({
+              projectId,
+              sceneIndex,
+              extendPrevious: sceneData.extendPrevious,
+              selectedAssetIds: sceneData.selectedAssetIds,
+              selectedAssetIdsCount: sceneData.selectedAssetIds.length,
+            }, 'Skipping reference_images because extendPrevious is true (Veo 3.1 doesn\'t support both)');
+          }
+
+          // Add image parameter for continuous mode (only if not using extendPrevious)
+          if (!sceneData.extendPrevious && previousLastFrame && (requestBody.continuous || requestBody.useReferenceFrame)) {
+            videoGenOptions.image = previousLastFrame;
+            fastify.log.info({
+              projectId,
+              sceneIndex,
+              hasImage: true,
+              mode: requestBody.continuous ? 'continuous' : 'useReferenceFrame',
+            }, 'Adding image parameter for continuous/reference frame mode');
+          }
+
+          const result = await generateVideo(videoGenOptions);
+          if (result.status === 'failed') {
+            throw new Error(`Scene ${sceneNumber} generation failed: ${result.error}`);
+          }
+
+          let videoUrl: string;
+          if (Array.isArray(result.output)) {
+            videoUrl = result.output[0];
+          } else if (typeof result.output === 'string') {
+            videoUrl = result.output;
+          } else {
+            throw new Error(`Unexpected output format from Replicate: ${typeof result.output}`);
+          }
+
+          // Download and upload to S3
+          const videoResponse = await fetch(videoUrl);
+          const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+          const uploadResult = await uploadGeneratedVideo(
+            videoBuffer,
+            user.sub,
+            projectId,
+            `scene-${sceneNumber}.mp4`
+          );
+
+          // Extract frames (non-blocking)
+          let frames: { firstFrameUrl?: string; lastFrameUrl?: string } = {};
+          try {
+            const frameResult = await extractFrames(uploadResult.url, user.sub, projectId, sceneNumber);
+            frames = frameResult;
+            previousSceneLastFrameUrl = frameResult.lastFrameUrl;
+          } catch (frameError: any) {
+            fastify.log.warn({ projectId, sceneIndex, sceneNumber, error: frameError.message }, 'Frame extraction failed, continuing');
+          }
+
+          // Save to database - update existing scene or insert new one
+          try {
+            // Check if scene exists first
+            const existingScene = await queryDb(
+              'SELECT video_url, first_frame_url, last_frame_url FROM scenes WHERE project_id = $1 AND scene_number = $2',
+              [projectId, sceneNumber]
+            );
+            
+            if (existingScene && existingScene.length > 0) {
+              // Update existing scene - replacing old video with new one
+              const sceneDuration = 8; // Default duration for scenes
+              const startTime = (sceneNumber - 1) * 8; // Calculate start time (scene 1 = 0s, scene 2 = 8s, etc.)
+              await queryDb(
+                `UPDATE scenes 
+                 SET prompt = $1, duration = $2, start_time = $3, video_url = $4, first_frame_url = $5, last_frame_url = $6, updated_at = NOW()
+                 WHERE project_id = $7 AND scene_number = $8`,
+                [sceneData.prompt, sceneDuration, startTime, uploadResult.url, frames.firstFrameUrl || null, frames.lastFrameUrl || null, projectId, sceneNumber]
+              );
+              fastify.log.info({ 
+                projectId, 
+                sceneIndex, 
+                sceneNumber,
+                oldVideoUrl: existingScene[0].video_url ? existingScene[0].video_url.substring(0, 100) + '...' : 'none',
+                newVideoUrl: uploadResult.url.substring(0, 100) + '...'
+              }, 'Updated existing scene with new video (parallel mode)');
+            } else {
+              // Insert new scene
+              const sceneDuration = 8; // Default duration for scenes
+              const startTime = (sceneNumber - 1) * 8; // Calculate start time (scene 1 = 0s, scene 2 = 8s, etc.)
+              await queryDb(
+                `INSERT INTO scenes (project_id, scene_number, prompt, duration, start_time, video_url, first_frame_url, last_frame_url, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+                [projectId, sceneNumber, sceneData.prompt, sceneDuration, startTime, uploadResult.url, frames.firstFrameUrl || null, frames.lastFrameUrl || null]
+              );
+              fastify.log.info({ 
+                projectId, 
+                sceneIndex, 
+                sceneNumber
+              }, 'Inserted new scene (parallel mode)');
+            }
+          } catch (dbError: any) {
+            fastify.log.error({ projectId, sceneIndex, error: dbError.message }, 'Failed to save scene to database');
+          }
+
+          return {
+            videoUrl: uploadResult.url,
+            firstFrameUrl: frames.firstFrameUrl,
+            lastFrameUrl: frames.lastFrameUrl,
+          };
+        });
+
+        // Use allSettled to handle partial failures - don't lose successful scenes if one fails
+        const results = await Promise.allSettled(generationPromises);
+        
+        // Process results - keep successful ones, log failures
+        const successfulScenes: Array<{ videoUrl: string; firstFrameUrl?: string; lastFrameUrl?: string }> = [];
+        const failedScenes: Array<{ sceneIndex: number; sceneNumber: number; error: string }> = [];
+        
+        results.forEach((result, index) => {
+          const sceneData = requestBody.scenes[index];
+          const sceneIndex = sceneData?.sceneIndex ?? (index + 1); // Default to 1-based if missing
+          const sceneNumber = sceneIndex; // sceneIndex is now 1-based, so it IS the scene_number
+          
+          if (result.status === 'fulfilled') {
+            successfulScenes.push(result.value);
+            sceneResults.push(result.value);
+            fastify.log.info({ 
+              projectId, 
+              sceneIndex,
+              sceneNumber,
+              hasVideoUrl: !!result.value.videoUrl
+            }, `Scene ${sceneNumber} generation succeeded in parallel mode`);
+          } else {
+            const errorMessage = result.reason?.message || 'Unknown error';
+            failedScenes.push({ sceneIndex, sceneNumber, error: errorMessage });
+            fastify.log.error({ 
+              projectId, 
+              sceneIndex,
+              sceneNumber,
+              error: errorMessage,
+              reason: result.reason,
+              stack: result.reason?.stack
+            }, `Scene ${sceneNumber} generation failed in parallel mode - scene will be missing from database`);
+          }
+        });
+        
+        // Log summary with scene numbers
+        const successfulSceneNumbers = results
+          .map((result, index) => result.status === 'fulfilled' ? requestBody.scenes[index]?.sceneIndex : null)
+          .filter((num): num is number => num !== null);
+        const failedSceneNumbers = failedScenes.map(f => f.sceneNumber);
+        
+        fastify.log.info({ 
+          projectId, 
+          successful: successfulScenes.length,
+          failed: failedScenes.length,
+          total: requestBody.scenes.length,
+          successfulSceneNumbers,
+          failedSceneNumbers
+        }, `Parallel generation completed: ${successfulScenes.length} succeeded (scenes: ${successfulSceneNumbers.join(', ')}), ${failedScenes.length} failed (scenes: ${failedSceneNumbers.join(', ')})`);
+        
+        // If all scenes failed, throw error
+        if (successfulScenes.length === 0) {
+          throw new Error(`All ${requestBody.scenes.length} scene(s) generation failed. Errors: ${failedScenes.map(f => `Scene ${f.sceneNumber}: ${f.error}`).join('; ')}`);
+        }
+        
+        // If some scenes failed, log warning but continue
+        if (failedScenes.length > 0) {
+          fastify.log.warn({ 
+            projectId,
+            failedScenes: failedScenes.map(f => ({ sceneNumber: f.sceneNumber, sceneIndex: f.sceneIndex, error: f.error }))
+          }, `${failedScenes.length} scene(s) failed (scenes: ${failedSceneNumbers.join(', ')}), but ${successfulScenes.length} succeeded (scenes: ${successfulSceneNumbers.join(', ')})`);
+        }
+      } else {
+        // Sequential generation - one after another
+        fastify.log.info({ projectId, sceneCount: requestBody.scenes.length }, 'Generating all scenes sequentially');
+        
+        for (let i = 0; i < requestBody.scenes.length; i++) {
+          const sceneData = requestBody.scenes[i];
+          const sceneIndex = sceneData.sceneIndex; // Now 1-based (1, 2, 3, 4, 5)
+          const sceneNumber = sceneIndex; // sceneIndex IS the scene_number now (1-based)
+
+          // Get previous scene's last frame if continuous is enabled
+          let previousLastFrame: string | undefined = undefined;
+          if (i > 0 && requestBody.continuous && previousSceneLastFrameUrl) {
+            previousLastFrame = previousSceneLastFrameUrl;
+          }
+
+          // Build video generation options
+          const videoGenOptions: any = {
+            prompt: sceneData.prompt,
+            duration: 8,
+            videoModelId: selectedVideoModelId,
+            aspectRatio,
+            style: requestBody.style || config.style,
+            mood: requestBody.mood || config.mood,
+            colorPalette: requestBody.colorPalette || config.colorPalette,
+            pacing: requestBody.pacing || config.pacing,
+            withAudio: true,
+          };
+
+          // IMPORTANT: Veo 3.1 doesn't support both 'video' (extendPrevious) and 'reference_images' together
+          // Check if this scene wants to extend previous video
+          if (sceneData.extendPrevious && i > 0) {
+            // Get previous scene's video URL from already generated scenes
+            const previousSceneResult = sceneResults[i - 1];
+            if (previousSceneResult && previousSceneResult.videoUrl) {
+              videoGenOptions.video = previousSceneResult.videoUrl;
+              fastify.log.info({
+                projectId,
+                sceneIndex,
+                previousVideoUrl: previousSceneResult.videoUrl.substring(0, 100) + '...',
+              }, 'Using previous scene video for extendPrevious (sequential mode)');
+              
+              // Don't add reference_images when using video parameter
+              fastify.log.info({
+                projectId,
+                sceneIndex,
+                extendPrevious: true,
+                referenceImagesCount: requestBody.referenceImages?.length || 0,
+              }, 'Skipping reference_images because extendPrevious is true (Veo 3.1 doesn\'t support both)');
+            } else {
+              fastify.log.warn({
+                projectId,
+                sceneIndex,
+                extendPrevious: sceneData.extendPrevious,
+                hasPreviousVideo: !!previousSceneResult?.videoUrl,
+              }, 'extendPrevious requested but previous scene video not available yet');
+            }
+          } else {
+            // Only add reference_images if extendPrevious is NOT true
+            // Filter reference images based on this scene's selectedAssetIds
+            if (!sceneData.extendPrevious && sceneData.selectedAssetIds && sceneData.selectedAssetIds.length > 0 && requestBody.assetIdToUrlMap) {
+              // Map selected asset IDs to URLs for this specific scene
+              const sceneReferenceImages = sceneData.selectedAssetIds
+                .map(assetId => requestBody.assetIdToUrlMap[assetId])
+                .filter(url => url !== undefined) as string[];
+              
+              if (sceneReferenceImages.length > 0) {
+                videoGenOptions.referenceImages = sceneReferenceImages;
+                fastify.log.info({
+                  projectId,
+                  sceneIndex,
+                  selectedAssetIds: sceneData.selectedAssetIds,
+                  referenceImagesCount: sceneReferenceImages.length,
+                  referenceImageUrls: sceneReferenceImages.map(url => url.substring(0, 100) + '...'),
+                }, 'Adding reference_images for scene based on selectedAssetIds (extendPrevious is false, sequential mode)');
+              }
+            } else if (sceneData.extendPrevious && sceneData.selectedAssetIds && sceneData.selectedAssetIds.length > 0) {
+              fastify.log.warn({
+                projectId,
+                sceneIndex,
+                extendPrevious: sceneData.extendPrevious,
+                selectedAssetIds: sceneData.selectedAssetIds,
+                selectedAssetIdsCount: sceneData.selectedAssetIds.length,
+              }, 'Skipping reference_images because extendPrevious is true (Veo 3.1 doesn\'t support both, sequential mode)');
+            }
+
+            // Add image parameter for continuous mode
+            if (previousLastFrame && (requestBody.continuous || requestBody.useReferenceFrame)) {
+              videoGenOptions.image = previousLastFrame;
+              fastify.log.info({
+                projectId,
+                sceneIndex,
+                hasImage: true,
+                mode: requestBody.continuous ? 'continuous' : 'useReferenceFrame',
+              }, 'Adding image parameter for continuous/reference frame mode');
+            }
+          }
+
+          try {
+            const result = await generateVideo(videoGenOptions);
+            if (result.status === 'failed') {
+              throw new Error(`Scene ${sceneNumber} generation failed: ${result.error}`);
+            }
+
+            let videoUrl: string;
+            if (Array.isArray(result.output)) {
+              videoUrl = result.output[0];
+            } else if (typeof result.output === 'string') {
+              videoUrl = result.output;
+            } else {
+              throw new Error(`Unexpected output format from Replicate: ${typeof result.output}`);
+            }
+
+            // Download and upload to S3
+            const videoResponse = await fetch(videoUrl);
+            const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+            const uploadResult = await uploadGeneratedVideo(
+              videoBuffer,
+              user.sub,
+              projectId,
+              `scene-${sceneNumber}.mp4`
+            );
+
+            // Extract frames (non-blocking)
+            let frames: { firstFrameUrl?: string; lastFrameUrl?: string } = {};
+            try {
+              const frameResult = await extractFrames(uploadResult.url, user.sub, projectId, sceneNumber);
+              frames = frameResult;
+              previousSceneLastFrameUrl = frameResult.lastFrameUrl;
+            } catch (frameError: any) {
+              fastify.log.warn({ projectId, sceneIndex, sceneNumber, error: frameError.message }, 'Frame extraction failed, continuing');
+            }
+
+            // Save to database - update existing scene or insert new one
+            // IMPORTANT: Save even if frame extraction failed - video is the critical data
+            try {
+              // Check if scene exists first
+              const existingScene = await queryDb(
+                'SELECT video_url, first_frame_url, last_frame_url FROM scenes WHERE project_id = $1 AND scene_number = $2',
+                [projectId, sceneNumber]
+              );
+              
+              if (existingScene && existingScene.length > 0) {
+                // Update existing scene - replacing old video with new one
+                const sceneDuration = 8; // Default duration for scenes
+                const startTime = (sceneNumber - 1) * 8; // Calculate start time (scene 1 = 0s, scene 2 = 8s, etc.)
+                await queryDb(
+                  `UPDATE scenes 
+                   SET prompt = $1, duration = $2, start_time = $3, video_url = $4, first_frame_url = $5, last_frame_url = $6, updated_at = NOW()
+                   WHERE project_id = $7 AND scene_number = $8`,
+                  [sceneData.prompt, sceneDuration, startTime, uploadResult.url, frames.firstFrameUrl || null, frames.lastFrameUrl || null, projectId, sceneNumber]
+                );
+                fastify.log.info({ 
+                  projectId, 
+                  sceneIndex, 
+                  sceneNumber,
+                  oldVideoUrl: existingScene[0].video_url ? existingScene[0].video_url.substring(0, 100) + '...' : 'none',
+                  newVideoUrl: uploadResult.url.substring(0, 100) + '...'
+                }, 'Updated existing scene with new video (sequential mode)');
+              } else {
+                // Insert new scene
+                const sceneDuration = 8; // Default duration for scenes
+                const startTime = (sceneNumber - 1) * 8; // Calculate start time (scene 1 = 0s, scene 2 = 8s, etc.)
+                await queryDb(
+                  `INSERT INTO scenes (project_id, scene_number, prompt, duration, start_time, video_url, first_frame_url, last_frame_url, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+                  [projectId, sceneNumber, sceneData.prompt, sceneDuration, startTime, uploadResult.url, frames.firstFrameUrl || null, frames.lastFrameUrl || null]
+                );
+                fastify.log.info({ 
+                  projectId, 
+                  sceneIndex, 
+                  sceneNumber
+                }, 'Inserted new scene (sequential mode)');
+              }
+            } catch (dbError: any) {
+              fastify.log.error({ projectId, sceneIndex, sceneNumber, error: dbError.message }, 'Failed to save scene to database');
+              // Don't throw - video is already uploaded to S3, we can retry DB save later
+            }
+
+            const sceneResult = {
+              videoUrl: uploadResult.url,
+              firstFrameUrl: frames.firstFrameUrl,
+              lastFrameUrl: frames.lastFrameUrl,
+            };
+            
+            sceneResults.push(sceneResult);
+          } catch (sceneError: any) {
+            // Log error but continue with other scenes - don't lose successful ones
+            fastify.log.error({ 
+              projectId, 
+              sceneIndex,
+              sceneNumber,
+              error: sceneError.message,
+              stack: sceneError.stack
+            }, `Scene ${sceneNumber} generation failed (sequential mode) - continuing with remaining scenes`);
+            
+            // Continue to next scene instead of throwing
+            // The error will be reported in the final response
+          }
+        }
+      }
+
+      // Stitch all videos together
+      let finalVideoUrl: string | null = null;
+      
+      if (sceneResults.length > 0 && sceneResults.every(r => r.videoUrl)) {
+        try {
+          const sceneVideoUrls = sceneResults.map(r => r.videoUrl).filter(url => url) as string[];
+          
+          if (sceneVideoUrls.length > 0) {
+            fastify.log.info({ projectId, sceneCount: sceneVideoUrls.length }, 'Stitching all scene videos together');
+            const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vidverse-stitch-'));
+            const concatVideoPath = path.join(tempDir, 'concat.mp4');
+
+            await concatenateVideos(sceneVideoUrls, concatVideoPath);
+            fastify.log.info({ projectId }, 'Videos concatenated successfully');
+
+            // Upload final video
+            const finalVideoBuffer = await fs.readFile(concatVideoPath);
+            const uploadResult = await uploadGeneratedVideo(
+              finalVideoBuffer,
+              user.sub,
+              projectId,
+              'final.mp4'
+            );
+            finalVideoUrl = uploadResult.url;
+
+            // Cleanup temp directory
+            await fs.rm(tempDir, { recursive: true, force: true });
+            fastify.log.info({ projectId, finalVideoUrl: finalVideoUrl.substring(0, 100) + '...' }, 'Final stitched video uploaded successfully');
+          } else {
+            fastify.log.warn({ projectId }, 'No valid scene video URLs to stitch');
+          }
+        } catch (stitchError: any) {
+          fastify.log.error({ projectId, error: stitchError.message, stack: stitchError.stack }, 'Failed to stitch videos, but scenes were generated successfully');
+          // Don't fail the entire request - scenes were generated, stitching just failed
+        }
+      } else {
+        fastify.log.warn({ projectId, sceneResultsCount: sceneResults.length }, 'No scene results to stitch');
+      }
+
+      // Save final video URL to database and config (if stitching succeeded)
+      if (finalVideoUrl) {
+        const { query } = await import('../services/database');
+        
+        // Update project config with final video URL
+        const currentConfig = typeof project.config === 'string' 
+          ? JSON.parse(project.config) 
+          : (project.config || {});
+        currentConfig.finalVideoUrl = finalVideoUrl;
+        currentConfig.videoUrl = finalVideoUrl; // Also save as videoUrl for compatibility
+        
+        // Try to update final_video_url column if it exists, otherwise just update config
+        try {
+          await query(
+            `UPDATE projects 
+             SET final_video_url = $1, 
+                 config = $2, 
+                 updated_at = NOW() 
+             WHERE id = $3`,
+            [finalVideoUrl, JSON.stringify(currentConfig), projectId]
+          );
+        } catch (dbError: any) {
+          // If final_video_url column doesn't exist, just update config
+          if (dbError.message && dbError.message.includes('final_video_url')) {
+            fastify.log.warn({ projectId, error: dbError.message }, 'final_video_url column does not exist, updating config only');
+            await query(
+              `UPDATE projects 
+               SET config = $1, 
+                   updated_at = NOW() 
+               WHERE id = $2`,
+              [JSON.stringify(currentConfig), projectId]
+            );
+          } else {
+            fastify.log.error({ projectId, error: dbError.message }, 'Failed to save final video URL to database');
+            // Don't throw - scenes were generated successfully
+          }
         }
 
-        sceneVideos = scenes.map(s => s.video_url).filter(Boolean) as string[];
+        fastify.log.info({ 
+          projectId, 
+          finalVideoUrl: finalVideoUrl.substring(0, 100) + '...' 
+        }, 'Final video generated, uploaded, and saved to database successfully');
       }
-      
-      if (sceneVideos.length === 0) {
-        fastify.log.warn({ projectId }, 'No valid scene video URLs found after filtering');
-        return reply.code(400).send({ 
-          error: 'No valid scene video URLs found',
-          message: 'Scene videos exist but URLs are invalid. Please regenerate scenes.'
-        });
-      }
-
-      fastify.log.info({ projectId, sceneCount: sceneVideos.length }, `Found ${sceneVideos.length} scenes to stitch`);
-
-      // Parse existing config
-      const config = typeof projectData.config === 'string' 
-        ? JSON.parse(projectData.config) 
-        : (projectData.config || {});
-
-      // Import video processing functions
-      const { concatenateVideos } = await import('../services/videoProcessor');
-      const { uploadGeneratedVideo } = await import('../services/storage');
-
-      // Create temp directory
-      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vidverse-stitch-'));
-      const concatVideoPath = path.join(tempDir, 'concat.mp4');
-
-      // Concatenate videos
-      await concatenateVideos(sceneVideos, concatVideoPath);
-      fastify.log.info({ projectId }, 'Videos concatenated successfully');
-
-      // Note: Audio is NOT automatically added during stitching
-      // Audio should be added separately via the add-audio endpoint
-      // This keeps stitching focused on just combining video scenes
-      let finalVideoPath = concatVideoPath;
-
-      // Upload final video
-      const finalVideoBuffer = await fs.readFile(finalVideoPath);
-      const uploadResult = await uploadGeneratedVideo(
-        finalVideoBuffer,
-        user.sub,
-        projectId,
-        'output.mp4'
-      );
-      fastify.log.info({ projectId, uploadUrl: uploadResult.url }, 'Final video uploaded successfully');
-
-      // Update project config
-      const updatedConfig = {
-        ...config,
-        videoUrl: uploadResult.url,
-        sceneUrls: sceneVideos,
-      };
-
-      await query(
-        'UPDATE projects SET config = $1 WHERE id = $2',
-        [JSON.stringify(updatedConfig), projectId]
-      );
-
-      // Cleanup
-      await fs.rm(tempDir, { recursive: true, force: true });
 
       return {
-        success: true,
-        videoUrl: uploadResult.url,
-        sceneCount: sceneVideos.length,
+        finalVideoUrl: finalVideoUrl || null,
+        sceneUrls: sceneResults.map(r => r.videoUrl),
+        frameUrls: sceneResults.map(r => ({ first: r.firstFrameUrl || '', last: r.lastFrameUrl || '' })),
       };
     } catch (error: any) {
-      fastify.log.error({ 
-        err: error,
-        projectId,
-        errorMessage: error?.message 
-      }, 'ERROR: Failed to stitch scenes');
-      
-      return reply.code(500).send({
-        error: 'Failed to stitch scenes',
-        message: error.message || 'An error occurred while stitching scenes',
+      fastify.log.error({ projectId, error: error.message }, 'Failed to generate all scenes');
+      return reply.code(500).send({ 
+        error: 'Generate all scenes failed',
+        message: error.message 
       });
     }
   });
+
 
   // Add audio to final video
   fastify.post('/projects/:id/add-audio', {
@@ -1989,15 +2870,16 @@ CRITICAL INSTRUCTIONS:
       );
       fastify.log.info({ projectId, uploadUrl: uploadResult.url }, 'Video with audio uploaded successfully');
 
-      // Update project config
+      // Update project config - when audio is added, this becomes the final video
       const updatedConfig = {
         ...config,
         videoUrl: uploadResult.url,
+        finalVideoUrl: uploadResult.url, // Save as finalVideoUrl since it has audio merged
         audioUrl: audioUrl,
       };
 
       await query(
-        'UPDATE projects SET config = $1 WHERE id = $2',
+        'UPDATE projects SET config = $1, updated_at = NOW() WHERE id = $2',
         [JSON.stringify(updatedConfig), projectId]
       );
 
@@ -2419,6 +3301,28 @@ CRITICAL INSTRUCTIONS:
               config.audioUrl = await convertS3UrlToPresigned(config.audioUrl, 3600);
             }
             
+            // Convert sceneUrls array to presigned URLs if it exists
+            if (config.sceneUrls && Array.isArray(config.sceneUrls)) {
+              config.sceneUrls = await Promise.all(
+                config.sceneUrls.map((url: string) => convertS3UrlToPresigned(url, 3600))
+              );
+            }
+            
+            // Convert audioTracks URLs to presigned URLs if they exist
+            if (config.audioTracks && Array.isArray(config.audioTracks)) {
+              config.audioTracks = await Promise.all(
+                config.audioTracks.map(async (track: any) => {
+                  if (track.url) {
+                    return {
+                      ...track,
+                      url: await convertS3UrlToPresigned(track.url, 3600),
+                    };
+                  }
+                  return track;
+                })
+              );
+            }
+            
             project.config = config;
           }
           return project;
@@ -2495,18 +3399,86 @@ CRITICAL INSTRUCTIONS:
     }
     
     // Convert videoUrl to presigned URL if it exists
-    if (config.videoUrl) {
-      config.videoUrl = await convertS3UrlToPresigned(config.videoUrl, 3600);
+    try {
+      if (config.videoUrl) {
+        const originalUrl = config.videoUrl;
+        config.videoUrl = await convertS3UrlToPresigned(config.videoUrl, 3600);
+        fastify.log.info({ 
+          projectId: id, 
+          originalUrl: originalUrl.substring(0, 150),
+          presignedUrl: config.videoUrl ? config.videoUrl.substring(0, 150) : null,
+          urlConverted: !!config.videoUrl
+        }, 'VideoUrl converted to presigned URL');
+      }
+    } catch (error: any) {
+      fastify.log.warn({ projectId: id, error: error?.message, url: config.videoUrl }, 'Failed to convert videoUrl to presigned URL');
     }
     
     // Convert finalVideoUrl to presigned URL if it exists (preferred over videoUrl)
-    if (config.finalVideoUrl) {
-      config.finalVideoUrl = await convertS3UrlToPresigned(config.finalVideoUrl, 3600);
+    try {
+      if (config.finalVideoUrl) {
+        const originalUrl = config.finalVideoUrl;
+        config.finalVideoUrl = await convertS3UrlToPresigned(config.finalVideoUrl, 3600);
+        fastify.log.info({ 
+          projectId: id, 
+          originalUrl: originalUrl.substring(0, 150),
+          presignedUrl: config.finalVideoUrl ? config.finalVideoUrl.substring(0, 150) : null,
+          urlConverted: !!config.finalVideoUrl
+        }, 'FinalVideoUrl converted to presigned URL');
+      }
+    } catch (error: any) {
+      fastify.log.warn({ projectId: id, error: error?.message, url: config.finalVideoUrl }, 'Failed to convert finalVideoUrl to presigned URL');
     }
     
     // Convert audioUrl to presigned URL if it exists
-    if (config.audioUrl) {
-      config.audioUrl = await convertS3UrlToPresigned(config.audioUrl, 3600);
+    try {
+      if (config.audioUrl) {
+        config.audioUrl = await convertS3UrlToPresigned(config.audioUrl, 3600);
+      }
+    } catch (error: any) {
+      fastify.log.warn({ projectId: id, error: error?.message, url: config.audioUrl }, 'Failed to convert audioUrl to presigned URL');
+    }
+    
+    // Convert sceneUrls array to presigned URLs if it exists
+    try {
+      if (config.sceneUrls && Array.isArray(config.sceneUrls)) {
+        config.sceneUrls = await Promise.all(
+          config.sceneUrls.map(async (url: string) => {
+            try {
+              return await convertS3UrlToPresigned(url, 3600);
+            } catch (error: any) {
+              fastify.log.warn({ projectId: id, error: error?.message, url }, 'Failed to convert sceneUrl to presigned URL');
+              return url; // Return original URL on error
+            }
+          })
+        );
+      }
+    } catch (error: any) {
+      fastify.log.warn({ projectId: id, error: error?.message }, 'Failed to convert sceneUrls to presigned URLs');
+    }
+    
+    // Convert audioTracks URLs to presigned URLs if they exist
+    try {
+      if (config.audioTracks && Array.isArray(config.audioTracks)) {
+        config.audioTracks = await Promise.all(
+          config.audioTracks.map(async (track: any) => {
+            if (track.url) {
+              try {
+                return {
+                  ...track,
+                  url: await convertS3UrlToPresigned(track.url, 3600),
+                };
+              } catch (error: any) {
+                fastify.log.warn({ projectId: id, error: error?.message, url: track.url }, 'Failed to convert audioTrack URL to presigned URL');
+                return track; // Return original track on error
+              }
+            }
+            return track;
+          })
+        );
+      }
+    } catch (error: any) {
+      fastify.log.warn({ projectId: id, error: error?.message }, 'Failed to convert audioTracks to presigned URLs');
     }
     
     // Always set config, even if it was null/undefined
@@ -2520,10 +3492,17 @@ CRITICAL INSTRUCTIONS:
       projectId: id, 
       hasConfig: !!response.config, 
       hasVideoUrl: !!config.videoUrl,
+      hasFinalVideoUrl: !!config.finalVideoUrl,
+      videoUrl: config.videoUrl || null,
+      finalVideoUrl: config.finalVideoUrl || null,
+      videoUrlPreview: config.videoUrl ? config.videoUrl.substring(0, 100) + '...' : null,
+      finalVideoUrlPreview: config.finalVideoUrl ? config.finalVideoUrl.substring(0, 100) + '...' : null,
+      hasSceneUrls: !!config.sceneUrls && Array.isArray(config.sceneUrls) && config.sceneUrls.length > 0,
+      sceneUrlCount: config.sceneUrls && Array.isArray(config.sceneUrls) ? config.sceneUrls.length : 0,
       configKeys: Object.keys(config),
       configType: typeof response.config,
       status: project.status 
-    }, 'Project fetched');
+    }, 'Project fetched - VIDEO URLS IN RESPONSE');
 
     // Ensure config is included in response
     return response;
@@ -2544,6 +3523,7 @@ CRITICAL INSTRUCTIONS:
       body: {
         type: 'object',
         properties: {
+          name: { type: 'string', minLength: 1, maxLength: 100 },
           prompt: { type: 'string' },
           style: { type: 'string' },
           mood: { type: 'string' },
@@ -2570,34 +3550,77 @@ CRITICAL INSTRUCTIONS:
     const values: any[] = [];
     let paramIndex = 1;
 
-    if (data.name) {
+    if (data.name !== undefined) {
       updates.push(`name = $${paramIndex++}`);
       values.push(data.name);
+      fastify.log.info({ projectId: id, newName: data.name }, 'Updating project name');
     }
+    // Track if we need to update config (to avoid multiple assignments)
+    let configToUpdate: any = null;
+    let configNeedsUpdate = false;
+    
     if (data.prompt) {
       updates.push(`prompt = $${paramIndex++}`);
       values.push(data.prompt);
+      
+      // If the prompt is a script (10000+ chars or JSON with scenes), also save it to config.script
+      // This ensures the full script is preserved even if prompt is updated
+      if (data.prompt.length > 10000 || (data.prompt.trim().startsWith('{') && data.prompt.includes('"scenes"'))) {
+        // Initialize configToUpdate if not already set
+        if (!configToUpdate) {
+          configToUpdate = (request.body as any).config 
+            ? { ...(request.body as any).config } // Start with provided config if exists
+            : (typeof project.config === 'string' ? JSON.parse(project.config) : { ...(project.config || {}) }); // Or use existing config
+        }
+        configToUpdate.script = data.prompt;
+        configNeedsUpdate = true;
+        fastify.log.info({ projectId: id, scriptLength: data.prompt.length }, 'Detected script in prompt update, saving to config.script');
+      }
     }
+    
     // Handle config updates - either full config object or individual fields
     if ((request.body as any).config) {
       // Full config update
       const newConfig = (request.body as any).config;
-      updates.push(`config = $${paramIndex++}`);
-      values.push(JSON.stringify(newConfig));
+      
+      // If we already have configToUpdate (from script merge above), merge the new config into it
+      if (configToUpdate) {
+        configToUpdate = { ...configToUpdate, ...newConfig }; // Merge, with newConfig taking precedence
+      } else {
+        configToUpdate = newConfig;
+      }
+      configNeedsUpdate = true;
+      
+      // Log if script is being saved
+      if (newConfig.script) {
+        fastify.log.info({ 
+          projectId: id, 
+          scriptLength: newConfig.script.length,
+          scriptPreview: newConfig.script.substring(0, 200) + '...',
+          hasScenes: newConfig.script.includes('"scenes"'),
+        }, 'Saving full script to config.script via PATCH');
+      }
     } else if (data.style || data.mood || data.constraints || data.audioUrl || data.videoModelId || data.aspectRatio || data.colorPalette || data.pacing || data.imageModelId) {
       // Partial config update (merge with existing)
-      const config = typeof project.config === 'string' ? JSON.parse(project.config) : (project.config || {});
-      if (data.style) config.style = data.style;
-      if (data.mood) config.mood = data.mood;
-      if (data.constraints) config.constraints = data.constraints;
-      if (data.audioUrl) config.audioUrl = data.audioUrl;
-      if (data.videoModelId) config.videoModelId = data.videoModelId;
-      if (data.aspectRatio) config.aspectRatio = data.aspectRatio;
-      if (data.colorPalette) config.colorPalette = data.colorPalette;
-      if (data.pacing) config.pacing = data.pacing;
-      if (data.imageModelId) config.imageModelId = data.imageModelId;
+      if (!configToUpdate) {
+        configToUpdate = typeof project.config === 'string' ? JSON.parse(project.config) : { ...(project.config || {}) };
+      }
+      if (data.style) configToUpdate.style = data.style;
+      if (data.mood) configToUpdate.mood = data.mood;
+      if (data.constraints) configToUpdate.constraints = data.constraints;
+      if (data.audioUrl) configToUpdate.audioUrl = data.audioUrl;
+      if (data.videoModelId) configToUpdate.videoModelId = data.videoModelId;
+      if (data.aspectRatio) configToUpdate.aspectRatio = data.aspectRatio;
+      if (data.colorPalette) configToUpdate.colorPalette = data.colorPalette;
+      if (data.pacing) configToUpdate.pacing = data.pacing;
+      if (data.imageModelId) configToUpdate.imageModelId = data.imageModelId;
+      configNeedsUpdate = true;
+    }
+    
+    // Add config update only once, if needed
+    if (configNeedsUpdate && configToUpdate) {
       updates.push(`config = $${paramIndex++}`);
-      values.push(JSON.stringify(config));
+      values.push(JSON.stringify(configToUpdate));
     }
     if (data.mode) {
       updates.push(`mode = $${paramIndex++}`);
@@ -2653,6 +3676,56 @@ CRITICAL INSTRUCTIONS:
     return reply.code(204).send();
   });
 
+  // Debug endpoint to check scenes in database (temporary)
+  fastify.get('/projects/:id/scenes/debug', {
+    preHandler: [authenticateCognito],
+  }, async (request, reply) => {
+    const user = getCognitoUser(request);
+    const { id } = request.params as { id: string };
+
+    const project = await queryOne(
+      'SELECT id, name, status, created_at FROM projects WHERE id = $1 AND user_id = $2',
+      [id, user.sub]
+    );
+
+    if (!project) {
+      return reply.code(404).send({ error: 'Project not found' });
+    }
+
+    const scenes = await query(
+      `SELECT id, scene_number, prompt, duration, start_time, video_url, first_frame_url, last_frame_url, created_at, updated_at
+       FROM scenes
+       WHERE project_id = $1
+       ORDER BY scene_number ASC`,
+      [id]
+    );
+
+    const projectConfig = await queryOne('SELECT config FROM projects WHERE id = $1', [id]);
+    const config = projectConfig?.config ? (typeof projectConfig.config === 'string' ? JSON.parse(projectConfig.config) : projectConfig.config) : {};
+
+    return {
+      project: {
+        id: project.id,
+        name: project.name,
+        status: project.status,
+        createdAt: project.created_at,
+      },
+      scenesInDatabase: scenes.length,
+      scenes: scenes.map((s: any) => ({
+        sceneNumber: s.scene_number,
+        prompt: s.prompt?.substring(0, 100),
+        hasVideoUrl: !!s.video_url,
+        videoUrl: s.video_url ? s.video_url.substring(0, 150) + '...' : null,
+        hasFirstFrame: !!s.first_frame_url,
+        hasLastFrame: !!s.last_frame_url,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+      })),
+      configSceneUrls: config.sceneUrls?.length || 0,
+      configHasSceneUrls: !!(config.sceneUrls && Array.isArray(config.sceneUrls) && config.sceneUrls.length > 0),
+    };
+  });
+
   // Get scenes for a project
   fastify.get('/projects/:id/scenes', {
     preHandler: [authenticateCognito],
@@ -2690,24 +3763,59 @@ CRITICAL INSTRUCTIONS:
       [id]
     );
 
-    // Convert S3 URLs to presigned URLs for secure access
+    // Convert S3 URLs to presigned URLs and map to frontend format
     const scenesWithPresignedUrls = await Promise.all(
-      scenes.map(async (scene: any) => ({
-        id: scene.id,
-        sceneNumber: scene.scene_number,
-        prompt: scene.prompt,
-        duration: scene.duration,
-        startTime: scene.start_time,
-        videoUrl: await convertS3UrlToPresigned(scene.video_url, 3600),
-        thumbnailUrl: await convertS3UrlToPresigned(scene.thumbnail_url, 3600),
-        firstFrameUrl: await convertS3UrlToPresigned(scene.first_frame_url, 3600),
-        lastFrameUrl: await convertS3UrlToPresigned(scene.last_frame_url, 3600),
-        createdAt: scene.created_at,
-        updatedAt: scene.updated_at,
-      }))
+      scenes.map(async (s: any) => {
+        let videoUrl = s.video_url;
+        let firstFrameUrl = s.first_frame_url;
+        let lastFrameUrl = s.last_frame_url;
+
+        // Convert to presigned URLs if they're S3 URLs
+        try {
+          if (videoUrl && (videoUrl.includes('s3.') || videoUrl.includes('amazonaws.com'))) {
+            videoUrl = await convertS3UrlToPresigned(videoUrl, 3600);
+          }
+          if (firstFrameUrl && (firstFrameUrl.includes('s3.') || firstFrameUrl.includes('amazonaws.com'))) {
+            firstFrameUrl = await convertS3UrlToPresigned(firstFrameUrl, 3600);
+          }
+          if (lastFrameUrl && (lastFrameUrl.includes('s3.') || lastFrameUrl.includes('amazonaws.com'))) {
+            lastFrameUrl = await convertS3UrlToPresigned(lastFrameUrl, 3600);
+          }
+        } catch (error: any) {
+          fastify.log.warn({ 
+            projectId: id, 
+            sceneNumber: s.scene_number,
+            error: error?.message 
+          }, 'Failed to convert scene URL to presigned URL');
+        }
+
+        return {
+          id: s.id,
+          sceneNumber: s.scene_number,
+          prompt: s.prompt,
+          duration: s.duration,
+          startTime: s.start_time,
+          videoUrl: videoUrl,
+          thumbnailUrl: s.thumbnail_url,
+          firstFrameUrl: firstFrameUrl,
+          lastFrameUrl: lastFrameUrl,
+          createdAt: s.created_at,
+          updatedAt: s.updated_at,
+        };
+      })
     );
 
-    return scenesWithPresignedUrls;
+    fastify.log.info({
+      projectId: id,
+      sceneCount: scenesWithPresignedUrls.length,
+      scenes: scenesWithPresignedUrls.map((s: any) => ({
+        sceneNumber: s.sceneNumber,
+        hasVideoUrl: !!s.videoUrl,
+        videoUrl: s.videoUrl ? s.videoUrl.substring(0, 100) + '...' : null,
+      })),
+    }, 'Scenes fetched for project with presigned URLs');
+
+    return reply.send(scenesWithPresignedUrls);
   });
 
   // Get frames for a project (stored in scenes table)
@@ -2993,6 +4101,309 @@ CRITICAL INSTRUCTIONS:
       return reply.code(500).send({
         error: 'Failed to delete draft',
         message: error.message || 'Could not delete draft from S3',
+      });
+    }
+  });
+
+  // Generate music for a project
+  fastify.post('/projects/:id/generate-music', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Generate music for a project using Minimax Music 1.5',
+      tags: ['projects'],
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+        },
+      },
+      body: {
+        type: 'object',
+        required: ['lyrics'],
+        properties: {
+          lyrics: { type: 'string', minLength: 1 },
+          prompt: { type: 'string' }, // Style prompt (required by API)
+          bitrate: { type: 'number' },
+          sample_rate: { type: 'number' },
+          audio_format: { type: 'string' },
+        },
+      },
+    },
+  }, async (request: FastifyRequest<{ Params: { id: string }; Body: { lyrics: string; prompt?: string; bitrate?: number; sample_rate?: number; audio_format?: string } }>, reply: FastifyReply) => {
+    const user = getCognitoUser(request);
+    const { id: projectId } = request.params;
+    const { lyrics, prompt, bitrate, sample_rate, audio_format } = request.body;
+
+    try {
+      // Verify project belongs to user
+      const project = await queryOne(
+        'SELECT id, config FROM projects WHERE id = $1 AND user_id = $2',
+        [projectId, user.sub]
+      );
+
+      if (!project) {
+        return reply.code(404).send({ error: 'Project not found' });
+      }
+
+      // Log the payload being sent
+      const musicPayload = {
+        lyrics: lyrics.substring(0, 100) + (lyrics.length > 100 ? '...' : ''),
+        lyricsLength: lyrics.length,
+        prompt: prompt || 'Jazz, Smooth Jazz, Romantic, Dreamy',
+        bitrate: bitrate || 256000,
+        sample_rate: sample_rate || 44100,
+        audio_format: audio_format || 'mp3',
+      };
+      fastify.log.info({ projectId, payload: musicPayload }, 'Music generation request payload');
+
+      // Generate music using Replicate
+      const { generateMusic } = await import('../services/replicate');
+      const musicUrl = await generateMusic(
+        lyrics,
+        prompt || 'Jazz, Smooth Jazz, Romantic, Dreamy',
+        {
+          bitrate: bitrate || 256000,
+          sample_rate: sample_rate || 44100,
+          audio_format: audio_format || 'mp3',
+        }
+      );
+
+      // Download music and upload to S3
+      const response = await fetch(musicUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to download music: ${response.statusText}`);
+      }
+
+      const musicBuffer = Buffer.from(await response.arrayBuffer());
+      const { uploadAudio } = await import('../services/storage');
+      const uploadResult = await uploadAudio(
+        musicBuffer,
+        user.sub,
+        projectId,
+        `music-${Date.now()}.mp3`
+      );
+
+      // Save music URL to project config
+      const currentConfig = typeof project.config === 'string' 
+        ? JSON.parse(project.config) 
+        : (project.config || {});
+      currentConfig.musicUrl = uploadResult.url;
+
+      await query(
+        'UPDATE projects SET config = $1, updated_at = NOW() WHERE id = $2',
+        [JSON.stringify(currentConfig), projectId]
+      );
+
+      fastify.log.info({ 
+        projectId, 
+        musicUrl: uploadResult.url.substring(0, 100) + '...' 
+      }, 'Music generated and saved successfully');
+
+      return reply.send({ musicUrl: uploadResult.url });
+    } catch (error: any) {
+      fastify.log.error({ 
+        projectId, 
+        error: error.message,
+        stack: error.stack,
+        note: 'Music generation failed, but this does not block other operations (video generation, etc.)'
+      }, 'Failed to generate music');
+      return reply.code(500).send({ 
+        error: 'Failed to generate music',
+        message: error.message,
+        note: 'Music generation failure does not affect video generation or other operations'
+      });
+    }
+  });
+
+  // Stitch scenes with optional music
+  fastify.post('/projects/:id/stitch', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Stitch all scenes together with optional music',
+      tags: ['projects'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+        },
+      },
+      // Body is optional - endpoint fetches scenes from database
+      // If body is provided, it can include optional musicUrl
+      body: {
+        type: 'object',
+        properties: {
+          musicUrl: { type: 'string' },
+        },
+        additionalProperties: false,
+      },
+    },
+  }, async (request: FastifyRequest<{ Params: { id: string }; Body?: { musicUrl?: string } }>, reply: FastifyReply) => {
+    const user = getCognitoUser(request);
+    const { id: projectId } = request.params;
+
+    try {
+      // Verify project belongs to user
+      const project = await queryOne(
+        'SELECT id, config FROM projects WHERE id = $1 AND user_id = $2',
+        [projectId, user.sub]
+      );
+
+      if (!project) {
+        return reply.code(404).send({ error: 'Project not found' });
+      }
+
+      // First, get ALL scenes to check for missing ones
+      const allScenes = await query(
+        `SELECT id, scene_number, video_url, prompt 
+         FROM scenes 
+         WHERE project_id = $1 
+         ORDER BY scene_number ASC`,
+        [projectId]
+      );
+
+      // Get scenes with video URLs for stitching
+      const scenes = await query(
+        `SELECT id, scene_number, video_url, prompt 
+         FROM scenes 
+         WHERE project_id = $1 AND video_url IS NOT NULL AND video_url != ''
+         ORDER BY scene_number ASC`,
+        [projectId]
+      );
+
+      // Log missing scenes (scenes without video URLs)
+      if (allScenes && allScenes.length > 0) {
+        const scenesWithVideos = new Set(scenes.map((s: any) => s.scene_number));
+        const missingScenes = allScenes
+          .filter((s: any) => !scenesWithVideos.has(s.scene_number))
+          .map((s: any) => ({ sceneNumber: s.scene_number, hasVideoUrl: !!s.video_url }));
+        
+        if (missingScenes.length > 0) {
+          fastify.log.warn({ 
+            projectId, 
+            missingScenes,
+            totalScenes: allScenes.length,
+            scenesWithVideos: scenes.length
+          }, `Some scenes are missing video URLs and will be skipped during stitching`);
+        }
+      }
+
+      if (!scenes || scenes.length === 0) {
+        return reply.code(400).send({ 
+          error: 'No scenes with videos found to stitch',
+          message: allScenes && allScenes.length > 0 
+            ? `Found ${allScenes.length} scene(s) but none have video URLs. Please generate videos for your scenes first.`
+            : 'No scenes found. Please create and generate scenes first.'
+        });
+      }
+
+      const sceneVideoUrls = scenes.map((s: any) => s.video_url).filter((url: string) => url) as string[];
+
+      if (sceneVideoUrls.length === 0) {
+        return reply.code(400).send({ error: 'No valid scene video URLs found' });
+      }
+
+      // Log which scenes are being stitched
+      const sceneNumbers = scenes.map((s: any) => s.scene_number).sort((a: number, b: number) => a - b);
+      fastify.log.info({ 
+        projectId, 
+        sceneCount: sceneVideoUrls.length,
+        sceneNumbers,
+        totalScenesInDb: allScenes?.length || 0
+      }, `Stitching ${sceneVideoUrls.length} scene(s) together (scenes: ${sceneNumbers.join(', ')})`);
+
+      // Get music URL from request body (preferred) or project config
+      const currentConfig = typeof project.config === 'string' 
+        ? JSON.parse(project.config) 
+        : (project.config || {});
+      const body = request.body || {};
+      const musicUrl = body.musicUrl || currentConfig.musicUrl;
+
+      // Stitch videos
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vidverse-stitch-'));
+      const concatVideoPath = path.join(tempDir, 'concat.mp4');
+      const finalVideoPath = path.join(tempDir, 'final.mp4');
+
+      const { concatenateVideos, addAudioToVideo } = await import('../services/videoProcessor');
+      const { uploadGeneratedVideo } = await import('../services/storage');
+
+      // Concatenate all scene videos
+      await concatenateVideos(sceneVideoUrls, concatVideoPath);
+      fastify.log.info({ projectId }, 'Videos concatenated successfully');
+
+      // Add music if available
+      if (musicUrl) {
+        fastify.log.info({ projectId, musicUrl: musicUrl.substring(0, 100) + '...' }, 'Adding music to stitched video');
+        await addAudioToVideo(concatVideoPath, musicUrl, finalVideoPath);
+        fastify.log.info({ projectId }, 'Music added to video successfully');
+      } else {
+        // No music, use concatenated video as final
+        await fs.copyFile(concatVideoPath, finalVideoPath);
+        fastify.log.info({ projectId }, 'No music available, using concatenated video as final');
+      }
+
+      // Upload final video
+      const finalVideoBuffer = await fs.readFile(finalVideoPath);
+      const uploadResult = await uploadGeneratedVideo(
+        finalVideoBuffer,
+        user.sub,
+        projectId,
+        'final-stitched.mp4'
+      );
+      const finalVideoUrl = uploadResult.url;
+
+      // Cleanup temp directory
+      await fs.rm(tempDir, { recursive: true, force: true });
+
+      // Update project config and database
+      currentConfig.finalVideoUrl = finalVideoUrl;
+      currentConfig.videoUrl = finalVideoUrl; // Also save as videoUrl for compatibility
+
+      // Try to update final_video_url column if it exists, otherwise just update config
+      try {
+        await query(
+          `UPDATE projects 
+           SET final_video_url = $1, 
+               config = $2, 
+               updated_at = NOW() 
+           WHERE id = $3`,
+          [finalVideoUrl, JSON.stringify(currentConfig), projectId]
+        );
+      } catch (dbError: any) {
+        // If final_video_url column doesn't exist, just update config
+        if (dbError.message && dbError.message.includes('final_video_url')) {
+          fastify.log.warn({ projectId, error: dbError.message }, 'final_video_url column does not exist, updating config only');
+          await query(
+            `UPDATE projects 
+             SET config = $1, 
+                 updated_at = NOW() 
+             WHERE id = $2`,
+            [JSON.stringify(currentConfig), projectId]
+          );
+        } else {
+          fastify.log.error({ projectId, error: dbError.message }, 'Failed to save final video URL to database');
+          throw dbError;
+        }
+      }
+
+      fastify.log.info({ 
+        projectId, 
+        finalVideoUrl: finalVideoUrl.substring(0, 100) + '...',
+        hasMusic: !!musicUrl
+      }, 'Scenes stitched successfully with music');
+
+      return reply.send({ 
+        success: true,
+        videoUrl: finalVideoUrl,
+        finalVideoUrl, // For backward compatibility
+        sceneCount: sceneVideoUrls.length,
+        hasMusic: !!musicUrl
+      });
+    } catch (error: any) {
+      fastify.log.error({ projectId, error: error.message, stack: error.stack }, 'Failed to stitch scenes');
+      return reply.code(500).send({ 
+        error: 'Failed to stitch scenes',
+        message: error.message 
       });
     }
   });

@@ -110,25 +110,21 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
         // Explicitly ensure reference frame parameters are not included when disabled
         if (previousSceneLastFrameUrl && i > 0) {
           if (shouldUseReferenceFrame) {
+            // For all models including Veo 3.1, use 'image' parameter for reference image from previous scene
+            // The 'image' parameter is used as a reference/starting point for the next clip
+            videoGenOptions.image = previousSceneLastFrameUrl;
             const selectedModelId = config.videoModelId || 'google/veo-3.1';
-            if (selectedModelId === 'google/veo-3.1') {
-              videoGenOptions.lastFrame = previousSceneLastFrameUrl;
-              console.log(`[WORKER] Using last frame from scene ${i} as reference for Veo 3.1: ${previousSceneLastFrameUrl}`);
-            } else {
-              // For other models (Veo 3, Veo 3 Fast, Sora 2, Kling), use image parameter
-              videoGenOptions.image = previousSceneLastFrameUrl;
-              console.log(`[WORKER] Using last frame from scene ${i} as reference image: ${previousSceneLastFrameUrl}`);
-            }
+            console.log(`[WORKER] Using last frame from scene ${i} as reference image for next clip (model: ${selectedModelId}): ${previousSceneLastFrameUrl}`);
           } else {
             // Explicitly ensure these are not set when useReferenceFrame is false
-            delete videoGenOptions.lastFrame;
             delete videoGenOptions.image;
+            delete videoGenOptions.lastFrame;
             console.log(`[WORKER] Skipping reference frame for scene ${i + 1} (useReferenceFrame disabled) - not including in Replicate API call`);
           }
         } else {
           // Ensure these are not set for first scene or when no previous frame exists
-          delete videoGenOptions.lastFrame;
           delete videoGenOptions.image;
+          delete videoGenOptions.lastFrame; // Keep for backward compatibility, but not used
         }
 
         // Generate video for scene with user's selected video model and aspect ratio
@@ -148,39 +144,43 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
           throw new Error(`Unexpected output format from Replicate: ${typeof result.output}`);
         }
 
-        // Download scene video from Replicate and upload to S3
-        try {
-          const videoResponse = await fetch(videoUrl);
-          if (!videoResponse.ok) {
-            throw new Error(`Failed to download video from Replicate: ${videoResponse.statusText}`);
-          }
-          const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
-          
-          const sceneVideoUpload = await uploadGeneratedVideo(
-            videoBuffer,
-            userId,
-            projectId,
-            `scene-${scene.sceneNumber}.mp4`
-          );
-          
-          // Use S3 URL instead of Replicate URL
-          videoUrl = sceneVideoUpload.url;
-        } catch (uploadError: any) {
-          console.error(`Failed to upload scene ${scene.sceneNumber} video to S3, using Replicate URL as fallback:`, uploadError.message);
-          // Continue with Replicate URL as fallback
+        // Download scene video from Replicate and upload to S3 - MANDATORY
+        console.log(`[WORKER] Downloading scene ${scene.sceneNumber} video from Replicate and uploading to S3`);
+        const videoResponse = await fetch(videoUrl);
+        if (!videoResponse.ok) {
+          throw new Error(`Failed to download video from Replicate: ${videoResponse.statusText}`);
         }
+        const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
+        console.log(`[WORKER] Video downloaded (${videoBuffer.length} bytes), uploading to S3`);
+        
+        const sceneVideoUpload = await uploadGeneratedVideo(
+          videoBuffer,
+          userId,
+          projectId,
+          `scene-${scene.sceneNumber}.mp4`
+        );
+        
+        // Use S3 URL instead of Replicate URL
+        videoUrl = sceneVideoUpload.url;
+        console.log(`[WORKER] Scene ${scene.sceneNumber} video successfully uploaded to S3: ${videoUrl}`);
         
         sceneVideos.push(videoUrl);
 
-        // Extract frames
-        const frames = await extractFrames(videoUrl, userId, projectId, scene.sceneNumber);
-        frameUrls.push({ first: frames.firstFrameUrl, last: frames.lastFrameUrl });
-        
-        // Store last frame URL for next scene (use full S3 URL)
-        previousSceneLastFrameUrl = frames.lastFrameUrl;
-        console.log(`[WORKER] Stored last frame URL for scene ${scene.sceneNumber}: ${previousSceneLastFrameUrl} (will use for next scene: ${i < scenes.length - 1})`);
+        // Extract frames (non-blocking - if it fails, we still save the scene)
+        let frames: { firstFrameUrl: string; lastFrameUrl: string } | null = null;
+        try {
+          frames = await extractFrames(videoUrl, userId, projectId, scene.sceneNumber);
+          frameUrls.push({ first: frames.firstFrameUrl, last: frames.lastFrameUrl });
+          
+          // Store last frame URL for next scene (use full S3 URL)
+          previousSceneLastFrameUrl = frames.lastFrameUrl;
+          console.log(`[WORKER] Stored last frame URL for scene ${scene.sceneNumber}: ${previousSceneLastFrameUrl} (will use for next scene: ${i < scenes.length - 1})`);
+        } catch (frameError: any) {
+          console.warn(`[WORKER] Frame extraction failed for scene ${scene.sceneNumber}, continuing without frames:`, frameError.message);
+          // Continue without frames - video URL is more important
+        }
 
-        // Store scene in database
+        // Store scene in database (ALWAYS save video URL, even if frame extraction failed)
         await query(
           `INSERT INTO scenes (project_id, scene_number, prompt, duration, start_time, video_url, first_frame_url, last_frame_url)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -192,9 +192,9 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
             scene.prompt,
             scene.duration,
             scene.startTime,
-            videoUrl,
-            frames.firstFrameUrl,
-            frames.lastFrameUrl,
+            videoUrl, // Always save video URL - this is the critical data
+            frames?.firstFrameUrl || null, // NULL if frame extraction failed
+            frames?.lastFrameUrl || null, // NULL if frame extraction failed
           ]
         );
       }
@@ -231,6 +231,8 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
         ? JSON.parse(projectData.config) 
         : (projectData.config || {});
       currentConfig.videoUrl = uploadResult.url;
+      currentConfig.finalVideoUrl = uploadResult.url; // Also save as finalVideoUrl for frontend compatibility
+      currentConfig.sceneUrls = sceneVideos; // Save scene URLs
       await query(
         `UPDATE projects SET status = 'completed', config = $1, updated_at = NOW() WHERE id = $2`,
         [JSON.stringify(currentConfig), projectId]
