@@ -3,12 +3,13 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ProtectedRoute } from "../components/auth/ProtectedRoute";
 import { useAuth } from "../components/auth/AuthProvider";
 import { apiRequest } from "../lib/api";
+import { uploadFile } from "../lib/upload";
 import { Header } from "../components/Header";
 import { VideoGenerationProgressModal } from "../components/VideoGenerationProgressModal";
 import { SynchronousVideoProgressModal } from "../components/SynchronousVideoProgressModal";
 import { ProjectConfirmationModal } from "../components/ProjectConfirmationModal";
 import { PreviewModal } from "../components/PreviewModal";
-import { Sparkles, ArrowRight, Settings, ArrowLeft, Pencil, Check, X, RotateCcw, Bot, Image as ImageIcon, FileText, ChevronRight, Loader2, Plus, Play, Video as VideoIcon } from "lucide-react";
+import { Sparkles, ArrowRight, Settings, ArrowLeft, Pencil, Check, X, RotateCcw, Bot, Image as ImageIcon, FileText, ChevronRight, Loader2, Plus, Play, Video as VideoIcon, Upload } from "lucide-react";
 import { AIChatPanel } from "../components/AIChatPanel";
 import { LeftPanel } from "../components/SimpleCreate/LeftPanel";
 import { MiddleSection } from "../components/SimpleCreate/MiddleSection";
@@ -130,7 +131,6 @@ function SimpleCreateContent() {
       );
 
       if (!assets || assets.length === 0) {
-        console.log(`[FRONTEND] No assets found for project ${projectId}`);
         setGeneratedAnchorImages([]);
         return null;
       }
@@ -147,8 +147,8 @@ function SimpleCreateContent() {
           isTemporary: false,
         }));
 
-      console.log(`[FRONTEND] Loaded ${imageAssets.length} assets from database for project ${projectId}`);
-      setGeneratedAnchorImages(renumberAnchorImages(imageAssets));
+      const renumberedAssets = renumberAnchorImages(imageAssets);
+      setGeneratedAnchorImages(renumberedAssets);
 
       // Extract prompts from assets for use in text boxes
       const assetPrompts = imageAssets.map(asset => asset.prompt || '');
@@ -490,11 +490,13 @@ function SimpleCreateContent() {
       }
       
       // Load project data into form
-      // Always set project name from database if it exists (don't let auto-generation overwrite it)
-      if (project.name && project.name.trim()) {
-        setProjectName(project.name);
-        console.log(`[FRONTEND] Loaded project name from database: ${project.name}`);
-      }
+      // Always set project name from database (don't let auto-generation overwrite it)
+      // Set it even if empty to prevent auto-generation from running
+      const loadedProjectName = project.name !== undefined && project.name !== null 
+        ? project.name.trim() 
+        : '';
+      
+      setProjectName(loadedProjectName);
       if (project.prompt) setPrompt(project.prompt);
       if (project.category) setCategory(project.category as "music_video" | "ad_creative" | "explainer");
       
@@ -531,20 +533,17 @@ function SimpleCreateContent() {
           // Set the prompts, prioritizing saved ones
           setAnchorImagePrompts(savedPrompts.slice(0, MAX_ANCHOR_ASSETS));
           const nonEmptyCount = savedPrompts.filter(p => p && p.trim()).length;
-          console.log(`[FRONTEND] Loaded ${nonEmptyCount} asset prompt(s) from config (total slots: ${savedPrompts.length})`);
           // Ensure asset 1 (index 0) is expanded by default
           setExpandedAssetIndex(0);
         } else if (assetPromptsFromMetadata && assetPromptsFromMetadata.some(p => p && p.trim())) {
           // If no saved prompts in config, use prompts from asset metadata
           setAnchorImagePrompts(assetPromptsFromMetadata);
           const nonEmptyCount = assetPromptsFromMetadata.filter(p => p && p.trim()).length;
-          console.log(`[FRONTEND] Loaded ${nonEmptyCount} asset prompt(s) from asset metadata (total slots: ${assetPromptsFromMetadata.length})`);
           // Ensure asset 1 (index 0) is expanded by default
           setExpandedAssetIndex(0);
         } else {
           // If no prompts anywhere, ensure we have at least one empty slot
           setAnchorImagePrompts(['']);
-          console.log(`[FRONTEND] No asset prompts found, initialized with empty slot`);
           // Ensure asset 1 (index 0) is expanded by default
           setExpandedAssetIndex(0);
         }
@@ -578,44 +577,46 @@ function SimpleCreateContent() {
           }
         }
         
-        // Load scenes from database (preferred method)
+        // Load scenes from database (URLs from PostgreSQL, prompts from config)
         try {
-          console.log(`[FRONTEND] Loading scenes for project ${projectId}`);
           const scenesData = await apiRequest<any[]>(`/api/projects/${projectId}/scenes`, { method: 'GET' }, token);
-          console.log(`[FRONTEND] Received scenes data:`, scenesData);
           
           if (scenesData && scenesData.length > 0) {
+            // Sort scenes by sceneNumber to ensure correct order (handle cases where scene_number might start from 2)
+            const sortedScenesData = [...scenesData].sort((a: any, b: any) => {
+              const aNum = a.sceneNumber || a.scene_number || 0;
+              const bNum = b.sceneNumber || b.scene_number || 0;
+              return aNum - bNum;
+            });
+            
             // Map database scenes to frontend Scene format
-            const loadedScenes: Scene[] = scenesData.map((scene: any) => {
-              console.log(`[FRONTEND] Mapping scene ${scene.sceneNumber}:`, {
-                id: scene.id,
-                prompt: scene.prompt,
-                hasVideoUrl: !!scene.videoUrl,
-                videoUrl: scene.videoUrl ? scene.videoUrl.substring(0, 100) + '...' : null,
-                hasFirstFrame: !!scene.firstFrameUrl,
-                hasLastFrame: !!scene.lastFrameUrl,
-              });
+            // Backend already merges prompts from config, so we use what's returned
+            const loadedScenes: Scene[] = sortedScenesData.map((scene: any, arrayIndex: number) => {
+              const displayNumber = arrayIndex + 1; // Frontend display number (1-based, starting from 1)
+              const backendSceneNumber = scene.sceneNumber || scene.scene_number || displayNumber;
+              
               
               return {
-                id: scene.id || `scene-${scene.sceneNumber}`,
-                prompt: scene.prompt || '',
-                videoUrl: scene.videoUrl,
-                firstFrameUrl: scene.firstFrameUrl,
-                lastFrameUrl: scene.lastFrameUrl,
+                id: scene.id || `scene-${displayNumber}`,
+                prompt: scene.prompt || '', // Prompt comes from config (merged by backend)
+                videoUrl: scene.videoUrl, // Video URL always from database (PostgreSQL)
+                firstFrameUrl: scene.firstFrameUrl, // Always from database
+                lastFrameUrl: scene.lastFrameUrl, // Always from database
                 extendPrevious: false, // Default to false - user can change it via checkbox
                 selectedAssetIds: [],
                 isGenerating: false,
               };
             });
             
-            // Merge with saved scene prompts from config (preserve video URLs but update prompts)
-            if (config.scenePrompts && Array.isArray(config.scenePrompts) && config.scenePrompts.length > 0) {
+            // Merge additional config data (selectedAssetIds, extendPrevious) if available
+            if (config.scenePrompts && Array.isArray(config.scenePrompts)) {
               const mergedScenes = loadedScenes.map((scene, index) => {
                 const savedPrompt = config.scenePrompts.find((sp: { id?: string; prompt?: string }) => sp.id === scene.id) || config.scenePrompts[index];
-                if (savedPrompt && savedPrompt.prompt) {
+                if (savedPrompt) {
                   return {
                     ...scene,
-                    prompt: savedPrompt.prompt, // Use saved prompt (user's latest input)
+                    // Keep prompt from backend (already merged from config)
+                    // But update other properties from config
                     selectedAssetIds: savedPrompt.selectedAssetIds || scene.selectedAssetIds,
                     extendPrevious: savedPrompt.extendPrevious !== undefined ? savedPrompt.extendPrevious : scene.extendPrevious,
                   };
@@ -623,59 +624,37 @@ function SimpleCreateContent() {
                 return scene;
               });
               setScenes(mergedScenes);
-              console.log(`[FRONTEND] Loaded ${mergedScenes.length} scenes from database and merged with saved prompts, ${mergedScenes.filter(s => s.videoUrl).length} with videos`);
             } else {
               setScenes(loadedScenes);
-              console.log(`[FRONTEND] Loaded ${loadedScenes.length} scenes from database, ${loadedScenes.filter(s => s.videoUrl).length} with videos`);
             }
           } else {
-            console.log(`[FRONTEND] No scenes found in database for project ${projectId}`);
-            // Fallback: Load scenes from config if database has none
+            // If no scenes in database, create empty scenes from config prompts only (no video URLs)
             if (config.scenePrompts && Array.isArray(config.scenePrompts) && config.scenePrompts.length > 0) {
-              // Use saved scene prompts from config
               const loadedScenes: Scene[] = config.scenePrompts.map((sp: { id?: string; prompt?: string; selectedAssetIds?: string[]; extendPrevious?: boolean }) => ({
                 id: sp.id || `scene-${Date.now()}-${Math.random()}`,
                 prompt: sp.prompt || '',
                 extendPrevious: sp.extendPrevious || false,
                 selectedAssetIds: sp.selectedAssetIds || [],
                 isGenerating: false,
-                // Try to get video URLs from config.sceneUrls if available
-                videoUrl: config.sceneUrls?.[config.scenePrompts.indexOf(sp)],
-                firstFrameUrl: config.frameUrls?.[config.scenePrompts.indexOf(sp)]?.first,
-                lastFrameUrl: config.frameUrls?.[config.scenePrompts.indexOf(sp)]?.last,
-              }));
-              setScenes(loadedScenes);
-              console.log(`[FRONTEND] Loaded ${loadedScenes.length} scenes from config (scenePrompts)`);
-            } else if (config.sceneUrls && Array.isArray(config.sceneUrls) && config.sceneUrls.length > 0) {
-              const loadedScenes: Scene[] = config.sceneUrls.map((url: string, index: number) => ({
-                id: `scene-${index + 1}`,
-                prompt: config.script?.scenes?.[index]?.prompt || `Scene ${index + 1}`,
-                videoUrl: url,
-                firstFrameUrl: config.frameUrls?.[index]?.first,
-                lastFrameUrl: config.frameUrls?.[index]?.last,
-                extendPrevious: index > 0,
-                selectedAssetIds: [],
-                isGenerating: false,
+                // No video URLs - they must come from database
               }));
               setScenes(loadedScenes);
             } else if (config.script?.scenes && Array.isArray(config.script.scenes)) {
-              // Load scenes from script
+              // Load scenes from script (prompts only, no video URLs)
               const loadedScenes: Scene[] = config.script.scenes.map((scene: any, index: number) => ({
                 id: `scene-${index + 1}`,
                 prompt: scene.prompt || '',
-                videoUrl: config.sceneUrls?.[index],
-                firstFrameUrl: config.frameUrls?.[index]?.first,
-                lastFrameUrl: config.frameUrls?.[index]?.last,
                 extendPrevious: index > 0,
                 selectedAssetIds: [],
                 isGenerating: false,
+                // No video URLs - they must come from database
               }));
               setScenes(loadedScenes);
             }
           }
         } catch (scenesError) {
           console.error('Error loading scenes from database:', scenesError);
-          // Fallback to config-based loading on error
+          // On error, only load prompts from config (no video URLs)
           if (config.scenePrompts && Array.isArray(config.scenePrompts) && config.scenePrompts.length > 0) {
             const loadedScenes: Scene[] = config.scenePrompts.map((sp: { id?: string; prompt?: string; selectedAssetIds?: string[]; extendPrevious?: boolean }) => ({
               id: sp.id || `scene-${Date.now()}-${Math.random()}`,
@@ -683,18 +662,7 @@ function SimpleCreateContent() {
               extendPrevious: sp.extendPrevious || false,
               selectedAssetIds: sp.selectedAssetIds || [],
               isGenerating: false,
-            }));
-            setScenes(loadedScenes);
-          } else if (config.sceneUrls && Array.isArray(config.sceneUrls) && config.sceneUrls.length > 0) {
-            const loadedScenes: Scene[] = config.sceneUrls.map((url: string, index: number) => ({
-              id: `scene-${index + 1}`,
-              prompt: config.script?.scenes?.[index]?.prompt || `Scene ${index + 1}`,
-              videoUrl: url,
-              firstFrameUrl: config.frameUrls?.[index]?.first,
-              lastFrameUrl: config.frameUrls?.[index]?.last,
-              extendPrevious: index > 0,
-              selectedAssetIds: [],
-              isGenerating: false,
+              // No video URLs - they must come from database
             }));
             setScenes(loadedScenes);
           }
@@ -707,13 +675,21 @@ function SimpleCreateContent() {
   };
 
   useEffect(() => {
-    // Only auto-generate project name if we don't have a projectIdFromUrl (new project)
-    // AND we don't already have a project name set
-    // If we're loading an existing project, the name will be set in loadProjectData
     // IMPORTANT: Never auto-generate name if we have a projectIdFromUrl (loading existing project)
-    if (!projectIdFromUrl && !projectName.trim()) {
+    // The project name will be loaded from the database in loadProjectData
+    // Only auto-generate project name for NEW projects (no projectIdFromUrl)
+    
+    // Early return: NEVER auto-generate for existing projects
+    if (projectIdFromUrl) {
+      return;
+    }
+    
+    // Only auto-generate for NEW projects (no projectIdFromUrl)
+    // Only auto-generate if we don't already have a project name set
+    if (!projectName.trim()) {
       getAutoProjectName().then(name => {
-        // Only set if still no name and still no projectIdFromUrl (user might have navigated to a project)
+        // Double-check: only set if still no name and still no projectIdFromUrl
+        // (user might have navigated to a project while this was running)
         if (!projectIdFromUrl && !projectName.trim()) {
           setProjectName(name);
         }
@@ -722,10 +698,15 @@ function SimpleCreateContent() {
     
     // Clear assets when starting a new project (no projectId in URL)
     // Assets should only be loaded from project config, not localStorage
-    if (!projectIdFromUrl) {
-      setGeneratedAnchorImages([]);
-    }
+    setGeneratedAnchorImages([]);
   }, [projectIdFromUrl]); // Only depend on projectIdFromUrl - don't re-run when projectName changes
+
+  // Ensure expandedAssetIndex is set if we have assets but it's null
+  useEffect(() => {
+    if (generatedAnchorImages.length > 0 && expandedAssetIndex === null) {
+      setExpandedAssetIndex(0);
+    }
+  }, [generatedAnchorImages, expandedAssetIndex]);
 
   // Note: Assets are loaded in loadProjectData, so we don't need a separate useEffect here
   // This was causing double-loading and potential race conditions
@@ -779,7 +760,6 @@ function SimpleCreateContent() {
         }),
       }, token);
 
-      console.log('[AUTO-SAVE] Project prompts and settings saved');
     } catch (error) {
       console.error('[AUTO-SAVE] Failed to save project:', error);
       // Don't show error to user - auto-save should be silent
@@ -802,7 +782,7 @@ function SimpleCreateContent() {
     // Set new timer
     autoSaveTimerRef.current = setTimeout(() => {
       autoSaveProject();
-    }, 2000); // 2 seconds debounce
+    }, 5000); // 5 seconds debounce (reduced from 2 seconds)
 
     // Cleanup on unmount or when dependencies change
     return () => {
@@ -826,7 +806,7 @@ function SimpleCreateContent() {
     // Set new timer
     autoSaveTimerRef.current = setTimeout(() => {
       autoSaveProject();
-    }, 2000); // 2 seconds debounce
+    }, 5000); // 5 seconds debounce (reduced from 2 seconds)
 
     // Cleanup on unmount or when dependencies change
     return () => {
@@ -1010,7 +990,6 @@ function SimpleCreateContent() {
               name: nameToSave,
             }),
           }, token);
-          console.log(`[FRONTEND] Project name saved to database: ${nameToSave}`);
         }
       } catch (error: any) {
         console.error('Error saving project name:', error);
@@ -1430,7 +1409,6 @@ function SimpleCreateContent() {
   };
 
   const handleGenerationError = (error: string) => {
-    console.error('Generation error:', error);
     alert(`Video generation failed: ${error}`);
     setShowProgressModal(false);
   };
@@ -1584,7 +1562,39 @@ function SimpleCreateContent() {
         // Replace existing asset or add new one
         setGeneratedAnchorImages(prev => {
           const filtered = prev.filter(img => img.assetNumber !== assetIndex + 1);
-          return renumberAnchorImages([...filtered, newImage]);
+          const updated = renumberAnchorImages([...filtered, newImage]);
+          
+          // Convert placeholder slot IDs in scenes to actual asset IDs
+          setScenes(currentScenes => {
+            return currentScenes.map(scene => {
+              const updatedSelectedIds = scene.selectedAssetIds
+                .map(id => {
+                  // Check if this is a placeholder slot ID (format: "slot-{index}")
+                  if (id.startsWith('slot-')) {
+                    const slotIndex = parseInt(id.replace('slot-', ''), 10);
+                    // Find the asset at this slot index (assetNumber = slotIndex + 1)
+                    const matchingAsset = updated.find(img => img.assetNumber === slotIndex + 1);
+                    return matchingAsset ? matchingAsset.id : id; // Keep placeholder if asset not found yet
+                  }
+                  return id; // Already a real ID
+                })
+                .filter(id => {
+                  // Remove placeholders that don't have matching assets yet, but keep real IDs
+                  if (id.startsWith('slot-')) {
+                    const slotIndex = parseInt(id.replace('slot-', ''), 10);
+                    return updated.some(img => img.assetNumber === slotIndex + 1);
+                  }
+                  return true; // Keep all real IDs
+                });
+              
+              return {
+                ...scene,
+                selectedAssetIds: updatedSelectedIds,
+              };
+            });
+          });
+          
+          return updated;
         });
 
         // Clear the prompt for this asset
@@ -1720,12 +1730,10 @@ function SimpleCreateContent() {
         );
 
         if (assetsToDelete.length > 0) {
-          console.log(`[GENERATE ALL] Deleting ${assetsToDelete.length} old asset(s) after successful generation`);
           const deletePromises = assetsToDelete.map(async (asset) => {
             if (asset.assetId) {
               try {
                 await apiRequest(`/api/assets/${asset.assetId}`, { method: 'DELETE' }, token);
-                console.log(`[GENERATE ALL] Deleted old asset ${asset.assetId} from database and S3`);
               } catch (error) {
                 console.error(`[GENERATE ALL] Failed to delete old asset ${asset.assetId}:`, error);
                 // Continue even if deletion fails - new asset is already generated
@@ -1739,7 +1747,39 @@ function SimpleCreateContent() {
         setGeneratedAnchorImages(prev => {
           // Filter out old assets that were replaced and add new ones
           const filtered = prev.filter(img => !assetNumbersToReplace.has(img.assetNumber));
-          return renumberAnchorImages([...filtered, ...newImages]);
+          const updated = renumberAnchorImages([...filtered, ...newImages]);
+          
+          // Convert placeholder slot IDs in scenes to actual asset IDs
+          setScenes(currentScenes => {
+            return currentScenes.map(scene => {
+              const updatedSelectedIds = scene.selectedAssetIds
+                .map(id => {
+                  // Check if this is a placeholder slot ID (format: "slot-{index}")
+                  if (id.startsWith('slot-')) {
+                    const slotIndex = parseInt(id.replace('slot-', ''), 10);
+                    // Find the asset at this slot index (assetNumber = slotIndex + 1)
+                    const matchingAsset = updated.find(img => img.assetNumber === slotIndex + 1);
+                    return matchingAsset ? matchingAsset.id : id; // Keep placeholder if asset not found yet
+                  }
+                  return id; // Already a real ID
+                })
+                .filter(id => {
+                  // Remove placeholders that don't have matching assets yet, but keep real IDs
+                  if (id.startsWith('slot-')) {
+                    const slotIndex = parseInt(id.replace('slot-', ''), 10);
+                    return updated.some(img => img.assetNumber === slotIndex + 1);
+                  }
+                  return true; // Keep all real IDs
+                });
+              
+              return {
+                ...scene,
+                selectedAssetIds: updatedSelectedIds,
+              };
+            });
+          });
+          
+          return updated;
         });
 
         // Clear prompts for successfully generated assets
@@ -1752,7 +1792,6 @@ function SimpleCreateContent() {
         });
       } else {
         // No assets were successfully generated - keep old ones untouched
-        console.log(`[GENERATE ALL] No assets were successfully generated. Keeping old assets.`);
       }
 
       // Collapse all text boxes
@@ -1779,6 +1818,74 @@ function SimpleCreateContent() {
     setSelectedAnchorImageIndex(index);
     setShowAnchorImageModal(true);
   }, []);
+
+  const handleUploadAsset = useCallback(async (assetIndex: number, file: File) => {
+    try {
+      const token = await getAccessToken();
+      if (!token) {
+        alert('Authentication required. Please log in.');
+        return;
+      }
+
+      const projectId = await ensureProjectExists();
+      if (!projectId) {
+        alert('Failed to create project. Please try again.');
+        return;
+      }
+
+      // Upload file to S3
+      const { url } = await uploadFile(
+        file,
+        'image',
+        token,
+        undefined,
+        projectId
+      );
+
+      // Save asset to database
+      const savedAsset = await apiRequest<{ id: string; type: string; url: string; filename: string; metadata?: Record<string, any> }>(
+        `/api/projects/${projectId}/assets`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            type: 'image',
+            url: url,
+            filename: file.name,
+          }),
+        },
+        token
+      );
+
+      // Create AnchorImage from uploaded asset
+      const newImage: AnchorImage = {
+        id: savedAsset.id,
+        assetId: savedAsset.id,
+        url: url,
+        prompt: anchorImagePrompts[assetIndex] || file.name,
+        assetNumber: assetIndex + 1,
+        isTemporary: false,
+      };
+
+      // Replace existing asset or add new one
+      setGeneratedAnchorImages(prev => {
+        const filtered = prev.filter(img => img.assetNumber !== assetIndex + 1);
+        const updated = renumberAnchorImages([...filtered, newImage]);
+        return updated;
+      });
+
+      // Update prompt if empty
+      if (!anchorImagePrompts[assetIndex]?.trim()) {
+        setAnchorImagePrompts(prev => {
+          const newPrompts = [...prev];
+          newPrompts[assetIndex] = file.name;
+          return newPrompts;
+        });
+      }
+    } catch (error: any) {
+      console.error('Error uploading asset:', error);
+      alert(`Failed to upload asset: ${error.message || 'Unknown error'}`);
+    }
+  }, [getAccessToken, ensureProjectExists, anchorImagePrompts]);
 
   const handleScenePromptChange = useCallback((sceneId: string, prompt: string) => {
     setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, prompt } : s));
@@ -1824,14 +1931,6 @@ function SimpleCreateContent() {
         .sort((a, b) => a.assetNumber - b.assetNumber)
         .filter(img => scene.selectedAssetIds.includes(img.id));
       const referenceImages = selectedAssets.map(img => img.url);
-      
-      // Log which assets are being used
-      console.log('Using reference images for scene generation:', {
-        totalAssets: generatedAnchorImages.length,
-        selectedAssets: scene.selectedAssetIds.length,
-        selectedAssetIds: scene.selectedAssetIds,
-        referenceImageUrls: referenceImages,
-      });
 
       // Get previous scene's video URL if extendPrevious is enabled
       let previousSceneVideoUrl: string | undefined;
@@ -1840,25 +1939,14 @@ function SimpleCreateContent() {
         const previousScene = scenes[sceneIndex - 1];
         if (scene.extendPrevious) {
           previousSceneVideoUrl = previousScene.videoUrl;
-          console.log('[FRONTEND] Extend previous enabled, previous scene video URL:', previousSceneVideoUrl ? previousSceneVideoUrl.substring(0, 100) + '...' : 'NOT AVAILABLE');
         }
         // For continuous mode, always get the last frame from previous scene
         if (continuous) {
           previousSceneLastFrame = previousScene.lastFrameUrl;
-          console.log('[FRONTEND] Continuous mode enabled:', {
-            sceneIndex,
-            continuous,
-            hasPreviousScene: !!previousScene,
-            previousSceneHasLastFrame: !!previousScene.lastFrameUrl,
-            previousSceneLastFrame: previousSceneLastFrame ? previousSceneLastFrame.substring(0, 100) + '...' : 'NOT AVAILABLE',
-            previousSceneVideoUrl: previousScene.videoUrl ? previousScene.videoUrl.substring(0, 100) + '...' : 'NOT AVAILABLE',
-          });
         }
-      } else {
-        console.log('[FRONTEND] First scene, sceneIndex:', sceneIndex);
       }
 
-      // Log request payload for debugging
+      // Build request payload
       const requestPayload = {
         sceneIndex,
         prompt: scene.prompt,
@@ -1874,12 +1962,6 @@ function SimpleCreateContent() {
         useReferenceFrame: scene.extendPrevious && useReferenceFrame,
         continuous: continuous,
       };
-      console.log('[FRONTEND] Sending scene generation request:', {
-        ...requestPayload,
-        previousSceneVideoUrl: previousSceneVideoUrl ? previousSceneVideoUrl.substring(0, 100) + '...' : undefined,
-        previousSceneLastFrame: previousSceneLastFrame ? previousSceneLastFrame.substring(0, 100) + '...' : undefined,
-        referenceImagesCount: referenceImages.length,
-      });
 
       // Call API to generate single scene
       const result = await apiRequest<{
@@ -2071,8 +2153,21 @@ function SimpleCreateContent() {
           }
           
           // Extract prompt (required by API, but we'll use default if not provided)
+          // Validate and clean prompt: must be 10-300 characters, style-only
           if (parsed.prompt && typeof parsed.prompt === 'string') {
-            extractedPrompt = parsed.prompt;
+            let promptText = parsed.prompt.trim();
+            
+            // If prompt is too short, use default
+            if (promptText.length < 10) {
+              console.warn(`Prompt too short (${promptText.length} chars), using default`);
+              extractedPrompt = 'Jazz, Smooth Jazz, Romantic, Dreamy';
+            } else if (promptText.length > 300) {
+              // If too long, truncate to 300 characters
+              console.warn(`Prompt too long (${promptText.length} chars), truncating to 300`);
+              extractedPrompt = promptText.substring(0, 300).trim();
+            } else {
+              extractedPrompt = promptText;
+            }
           }
           
           // Extract optional parameters
@@ -2199,6 +2294,107 @@ function SimpleCreateContent() {
     }
   }, [getAccessToken, ensureProjectExists, generatedMusicUrl]);
 
+  // Import handler for structured project data from chat
+  const handleImportProject = useCallback((projectData: {
+    script?: string;
+    assets?: Array<{ name: string; prompt: string }>;
+    scenes?: Array<{ sceneNumber: number; prompt: string; assetIds: string[] }>;
+    music?: { lyrics?: string; prompt?: string; bitrate?: string; sample_rate?: string; audio_format?: string };
+  }) => {
+    try {
+      // Import assets (limit to 5)
+      if (projectData.assets && projectData.assets.length > 0) {
+        const assetPrompts = projectData.assets.slice(0, 5).map(asset => asset.prompt);
+        // Pad to 5 slots if needed
+        while (assetPrompts.length < 5) {
+          assetPrompts.push('');
+        }
+        setAnchorImagePrompts(assetPrompts);
+        console.log(`Imported ${assetPrompts.filter(p => p).length} asset prompts`);
+      }
+
+      // Import scenes
+      if (projectData.scenes && projectData.scenes.length > 0) {
+        // Create a map from asset names to their slot indices (0-based)
+        // These will be used to map to actual asset IDs after assets are generated
+        const assetNameToSlotIndex = new Map<string, number>();
+        if (projectData.assets) {
+          projectData.assets.forEach((asset, index) => {
+            assetNameToSlotIndex.set(asset.name, index);
+          });
+        }
+
+        const importedScenes: Scene[] = projectData.scenes
+          .sort((a, b) => a.sceneNumber - b.sceneNumber)
+          .map((scene, index) => {
+            // Map asset names to slot indices
+            // Note: We'll need to map these to actual asset IDs after assets are generated
+            // For now, we store them as placeholder IDs that match the slot index
+            // The actual mapping will happen when assets are generated and we can match by assetNumber
+            const mappedAssetSlotIndices = (scene.assetIds || [])
+              .map(assetName => {
+                const slotIndex = assetNameToSlotIndex.get(assetName);
+                return slotIndex !== undefined ? slotIndex : null;
+              })
+              .filter((idx): idx is number => idx !== null);
+
+            // Store slot indices temporarily - we'll map to actual IDs after assets are generated
+            // Use a special format: "slot-{index}" that we can identify and convert later
+            const placeholderIds = mappedAssetSlotIndices.map(idx => `slot-${idx}`);
+
+            return {
+              id: `scene-${scene.sceneNumber}`,
+              prompt: scene.prompt,
+              extendPrevious: index > 0, // First scene doesn't extend previous
+              selectedAssetIds: placeholderIds, // Will be converted to actual IDs after asset generation
+              isGenerating: false,
+            };
+          });
+        
+        setScenes(importedScenes);
+        console.log(`Imported ${importedScenes.length} scenes with asset slot mappings (will convert to IDs after assets are generated)`);
+        
+        // Set up a useEffect to convert slot indices to actual asset IDs when assets are generated
+        // This will be handled by checking if any selectedAssetIds start with "slot-" and converting them
+      }
+
+      // Import music prompt as JSON string
+      if (projectData.music) {
+        const musicJSON = JSON.stringify(projectData.music, null, 2);
+        setMusicPrompt(musicJSON);
+        console.log('Imported music prompt:', projectData.music);
+      }
+
+      // Optionally set the main prompt to the script
+      if (projectData.script) {
+        setPrompt(projectData.script);
+      }
+
+      alert(`Successfully imported ${projectData.assets?.length || 0} assets, ${projectData.scenes?.length || 0} scenes, and music prompt!`);
+    } catch (error: any) {
+      console.error('Error importing project data:', error);
+      alert(`Failed to import project data: ${error.message}`);
+    }
+  }, []);
+
+  // Check for quick create import data on mount - ONLY for new projects (no projectIdFromUrl)
+  useEffect(() => {
+    // Only import quick create data if we're NOT loading an existing project
+    if (!projectIdFromUrl) {
+      const quickCreateData = sessionStorage.getItem('quickCreateProjectData');
+      if (quickCreateData) {
+        try {
+          const projectData = JSON.parse(quickCreateData);
+          handleImportProject(projectData);
+          sessionStorage.removeItem('quickCreateProjectData');
+        } catch (error) {
+          console.error('Error importing quick create data:', error);
+          sessionStorage.removeItem('quickCreateProjectData');
+        }
+      }
+    }
+  }, [projectIdFromUrl, handleImportProject]);
+
   return (
     <div className="min-h-screen relative overflow-hidden">
       {/* Animated Textured Background */}
@@ -2313,6 +2509,7 @@ function SimpleCreateContent() {
           isGeneratingMusic={isGeneratingMusic}
           onGenerateMusic={handleGenerateMusic}
           finalVideoUrl={finalVideoUrl}
+          onUploadAsset={handleUploadAsset}
         />
 
         {/* Right Panel - Reserved for future features */}
@@ -2343,6 +2540,7 @@ function SimpleCreateContent() {
             textarea.focus();
           }
         }}
+        onImportProject={handleImportProject}
       />
 
       {/* Confirmation Modal */}

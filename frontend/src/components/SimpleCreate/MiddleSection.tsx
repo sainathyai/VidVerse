@@ -1,5 +1,6 @@
 import React from "react";
-import { Pencil, Check, X, Image as ImageIcon, Loader2, Plus, Play, Video as VideoIcon, Music } from "lucide-react";
+import { Pencil, Check, X, Image as ImageIcon, Loader2, Plus, Play, Video as VideoIcon, Music, Upload } from "lucide-react";
+import { useAuth } from "../auth/AuthProvider";
 
 const MAX_ANCHOR_ASSETS = 5;
 
@@ -70,6 +71,7 @@ interface MiddleSectionProps {
   isGeneratingMusic: boolean;
   onGenerateMusic: () => Promise<void>;
   finalVideoUrl: string | null;
+  onUploadAsset?: (assetIndex: number, file: File) => Promise<void>;
 }
 
 export function MiddleSection({
@@ -119,8 +121,106 @@ export function MiddleSection({
   isGeneratingMusic,
   onGenerateMusic,
   finalVideoUrl,
+  onUploadAsset,
 }: MiddleSectionProps) {
   const [draggedIndex, setDraggedIndex] = React.useState<number | null>(null);
+  const { getAccessToken } = useAuth();
+  const [assetBlobUrls, setAssetBlobUrls] = React.useState<Map<string, string>>(new Map());
+  const fetchedAssetIdsRef = React.useRef<Set<string>>(new Set());
+
+  // Fetch asset images with credentials and convert to blob URLs
+  React.useEffect(() => {
+    const fetchAssetImages = async () => {
+      const newBlobUrls = new Map<string, string>();
+      const assetIdsToFetch = generatedAnchorImages
+        .filter(asset => asset.assetId)
+        .map(asset => asset.assetId!);
+      
+      if (assetIdsToFetch.length === 0) {
+        return;
+      }
+      
+      const token = await getAccessToken();
+      if (!token) {
+        return;
+      }
+      
+      // Filter out assets we've already fetched
+      const idsToFetch = assetIdsToFetch.filter(assetId => !fetchedAssetIdsRef.current.has(assetId));
+      
+      if (idsToFetch.length === 0) {
+        return;
+      }
+      
+      for (const assetId of idsToFetch) {
+        try {
+          const response = await fetch(`/api/assets/${assetId}/proxy`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          });
+          
+          if (response.ok) {
+            const blob = await response.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            newBlobUrls.set(assetId, blobUrl);
+            fetchedAssetIdsRef.current.add(assetId);
+          } else {
+            console.error(`[MIDDLE_SECTION] Failed to fetch asset ${assetId}: ${response.status} ${response.statusText}`);
+          }
+        } catch (error) {
+          console.error(`[MIDDLE_SECTION] Failed to fetch asset ${assetId}:`, error);
+        }
+      }
+      
+      if (newBlobUrls.size > 0) {
+        setAssetBlobUrls(prev => {
+          const merged = new Map(prev);
+          newBlobUrls.forEach((url, id) => merged.set(id, url));
+          return merged;
+        });
+      }
+    };
+
+    fetchAssetImages();
+
+    // Cleanup blob URLs on unmount or when assets change
+    return () => {
+      // Only revoke URLs that are no longer needed
+      setAssetBlobUrls(prev => {
+        const currentAssetIds = new Set(generatedAnchorImages
+          .filter(asset => asset.assetId)
+          .map(asset => asset.assetId!));
+        
+        const toRevoke: string[] = [];
+        prev.forEach((url, id) => {
+          if (!currentAssetIds.has(id)) {
+            toRevoke.push(url);
+            fetchedAssetIdsRef.current.delete(id);
+          }
+        });
+        
+        toRevoke.forEach(url => URL.revokeObjectURL(url));
+        
+        // Return only URLs for current assets
+        const kept = new Map<string, string>();
+        prev.forEach((url, id) => {
+          if (currentAssetIds.has(id)) {
+            kept.set(id, url);
+          }
+        });
+        return kept;
+      });
+    };
+  }, [generatedAnchorImages.map(a => a.assetId).filter(Boolean).join(','), getAccessToken]);
+
+  // Helper to get image URL (blob URL if available, otherwise fallback to direct URL)
+  const getAssetImageUrl = (asset: AnchorImage): string => {
+    if (asset.assetId && assetBlobUrls.has(asset.assetId)) {
+      return assetBlobUrls.get(asset.assetId)!;
+    }
+    return asset.url;
+  };
   
   return (
     <div className="flex-1 flex flex-col p-8 animate-fade-in relative" style={{ marginLeft: '2%', marginRight: '10%' }}>
@@ -188,44 +288,76 @@ export function MiddleSection({
             <div className="grid grid-cols-5 gap-4">
               {/* Asset Display - Show current expanded asset */}
               <div className="space-y-2 col-span-2">
-                {expandedAssetIndex !== null && generatedAnchorImages[expandedAssetIndex] ? (
-                  <div className="relative aspect-video rounded-lg border border-white/20 bg-gradient-to-br from-white/5 to-transparent backdrop-blur-sm overflow-hidden hover:border-blue-500/60 hover:shadow-lg hover:shadow-blue-500/20 transition-all cursor-pointer group">
-                    <button
-                      type="button"
-                      onClick={() => onAnchorImageClick(expandedAssetIndex)}
-                      className="w-full h-full"
+                {(() => {
+                  // Find asset by assetNumber (1-based) instead of array index
+                  // expandedAssetIndex is 0-based (0, 1, 2, 3, 4), assetNumber is 1-based (1, 2, 3, 4, 5)
+                  const assetNumber = expandedAssetIndex !== null ? expandedAssetIndex + 1 : null;
+                  const expandedAsset = assetNumber ? generatedAnchorImages.find(img => img.assetNumber === assetNumber) : null;
+                  
+                  if (!expandedAsset) {
+                    return (
+                      <div className="aspect-video rounded-lg border-2 border-dashed border-white/20 flex items-center justify-center">
+                        <div className="text-center text-white/40">
+                          <ImageIcon className="w-8 h-8 mx-auto mb-2" />
+                          <p className="text-xs">
+                            {expandedAssetIndex !== null ? `Asset ${expandedAssetIndex + 1}` : 'Select an asset to view'}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  }
+                  
+                  return (
+                    <div 
+                      className="relative aspect-video rounded-lg border border-white/20 bg-gradient-to-br from-white/5 to-transparent backdrop-blur-sm overflow-hidden hover:border-blue-500/60 hover:shadow-lg hover:shadow-blue-500/20 transition-all cursor-pointer group"
+                      style={{ minHeight: '200px', backgroundColor: 'rgba(0,0,0,0.3)' }}
+                      data-asset-id={expandedAsset.id}
+                      data-asset-number={expandedAsset.assetNumber}
                     >
-                      <img
-                        src={generatedAnchorImages[expandedAssetIndex].url}
-                        alt={generatedAnchorImages[expandedAssetIndex].prompt || `Asset ${generatedAnchorImages[expandedAssetIndex].assetNumber}`}
-                        className="w-full h-full object-cover"
-                      />
-                    </button>
-                    <div className="absolute top-2 left-2 z-10 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 text-xs text-white/90 border border-white/10">
-                      <span>Asset {generatedAnchorImages[expandedAssetIndex].assetNumber}</span>
+                      <button
+                        type="button"
+                        onClick={() => onAnchorImageClick(expandedAssetIndex)}
+                        className="w-full h-full relative"
+                      >
+                        {expandedAsset.url ? (
+                          <img
+                            key={`asset-img-${expandedAsset.id}-${expandedAsset.url.length}`}
+                            src={getAssetImageUrl(expandedAsset)}
+                            alt={expandedAsset.prompt || `Asset ${expandedAsset.assetNumber}`}
+                            className="w-full h-full object-cover"
+                            style={{ display: 'block', minHeight: '200px' }}
+                            onError={(e) => {
+                              const img = e.currentTarget;
+                              console.error(`[MIDDLE_SECTION] ✗ Asset image failed to load:`, {
+                                url: expandedAsset.url,
+                                assetId: expandedAsset.assetId,
+                                src: img.src.substring(0, 100),
+                              });
+                            }}
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center bg-red-500/20">
+                            <span className="text-white">No URL</span>
+                          </div>
+                        )}
+                      </button>
+                      <div className="absolute top-2 left-2 z-10 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 text-xs text-white/90 border border-white/10">
+                        <span>Asset {expandedAsset.assetNumber}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          await onRemoveAnchorImage(expandedAsset);
+                        }}
+                        className="absolute top-2 right-2 p-1.5 bg-gradient-to-br from-red-500/90 to-red-600/90 hover:from-red-500 hover:to-red-600 text-white rounded-full text-xs opacity-0 group-hover:opacity-100 transition-all duration-200 backdrop-blur-sm border border-white/20 shadow-lg hover:shadow-xl hover:scale-110 z-20"
+                        title="Remove image"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={async (e) => {
-                        e.stopPropagation();
-                        await onRemoveAnchorImage(generatedAnchorImages[expandedAssetIndex]);
-                      }}
-                      className="absolute top-2 right-2 p-1.5 bg-gradient-to-br from-red-500/90 to-red-600/90 hover:from-red-500 hover:to-red-600 text-white rounded-full text-xs opacity-0 group-hover:opacity-100 transition-all duration-200 backdrop-blur-sm border border-white/20 shadow-lg hover:shadow-xl hover:scale-110 z-20"
-                      title="Remove image"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                ) : (
-                  <div className="aspect-video rounded-lg border-2 border-dashed border-white/20 flex items-center justify-center">
-                    <div className="text-center text-white/40">
-                      <ImageIcon className="w-8 h-8 mx-auto mb-2" />
-                      <p className="text-xs">
-                        {expandedAssetIndex !== null ? `Asset ${expandedAssetIndex + 1}` : 'Select an asset to view'}
-                      </p>
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
               
               {/* Text Box and Collapsed Assets */}
@@ -276,68 +408,102 @@ export function MiddleSection({
                       const isGenerating = isGeneratingAssets[index] || false;
                       const isDragging = draggedIndex === index;
 
+                      const assetInputId = `asset-upload-${index}`;
                       return (
-                        <button
-                          key={index}
-                          type="button"
-                          draggable
-                          onDragStart={(e) => {
-                            setDraggedIndex(index);
-                            e.dataTransfer.effectAllowed = 'move';
-                            e.dataTransfer.setData('text/plain', index.toString());
-                          }}
-                          onDragEnd={() => {
-                            setDraggedIndex(null);
-                          }}
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            e.dataTransfer.dropEffect = 'move';
-                          }}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            const fromIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
-                            if (fromIndex !== index && !isNaN(fromIndex)) {
-                              onReorderAssets(fromIndex, index);
-                            }
-                            setDraggedIndex(null);
-                          }}
-                          onClick={() => {
-                            // Collapse previous and expand this one
-                            onExpandedAssetIndexChange(index);
-                          }}
-                          className={`rounded border text-left px-2 py-1.5 text-xs transition-all cursor-move ${
-                            isDragging ? 'opacity-50' : ''
-                          } ${
-                            isExpanded
-                              ? 'border-blue-500/60 bg-blue-500/20 text-white'
-                              : 'border-white/20 bg-gradient-to-br from-blue-500/10 via-purple-500/8 to-pink-500/5 text-white/70 hover:text-white hover:border-white/40'
-                          }`}
-                        >
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            {existingAsset ? (
-                              <img
-                                src={existingAsset.url}
-                                alt={`Asset ${index + 1}`}
-                                className="w-6 h-6 rounded object-cover flex-shrink-0"
-                              />
-                            ) : (
-                              <div className="w-6 h-6 rounded border border-white/20 bg-white/5 flex items-center justify-center flex-shrink-0">
-                                <ImageIcon className="w-3 h-3 text-white/40" />
-                              </div>
-                            )}
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-1">
-                                <span className="font-medium">Asset {index + 1}</span>
-                                {isGenerating && (
-                                  <Loader2 className="w-2.5 h-2.5 animate-spin text-purple-400 flex-shrink-0" />
+                        <div key={index} className="relative group">
+                          <input
+                            id={assetInputId}
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              if (e.target.files && e.target.files.length > 0 && onUploadAsset) {
+                                onUploadAsset(index, e.target.files[0]);
+                                e.target.value = '';
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            draggable
+                            onDragStart={(e) => {
+                              setDraggedIndex(index);
+                              e.dataTransfer.effectAllowed = 'move';
+                              e.dataTransfer.setData('text/plain', index.toString());
+                            }}
+                            onDragEnd={() => {
+                              setDraggedIndex(null);
+                            }}
+                            onDragOver={(e) => {
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = 'move';
+                            }}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              const fromIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                              if (fromIndex !== index && !isNaN(fromIndex)) {
+                                onReorderAssets(fromIndex, index);
+                              }
+                              setDraggedIndex(null);
+                            }}
+                            onClick={() => {
+                              // Collapse previous and expand this one
+                              onExpandedAssetIndexChange(index);
+                            }}
+                            className={`rounded border text-left px-2 py-1.5 text-xs transition-all cursor-move w-full ${
+                              isDragging ? 'opacity-50' : ''
+                            } ${
+                              isExpanded
+                                ? 'border-blue-500/60 bg-blue-500/20 text-white'
+                                : 'border-white/20 bg-gradient-to-br from-blue-500/10 via-purple-500/8 to-pink-500/5 text-white/70 hover:text-white hover:border-white/40'
+                            }`}
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {existingAsset ? (
+                                <img
+                                  src={getAssetImageUrl(existingAsset)}
+                                  alt={`Asset ${index + 1}`}
+                                  className="w-6 h-6 rounded object-cover flex-shrink-0"
+                                  onError={(e) => {
+                                    const img = e.currentTarget;
+                                    console.error(`[MIDDLE_SECTION] ✗ Thumbnail image failed to load:`, {
+                                      assetId: existingAsset.assetId,
+                                      url: existingAsset.url,
+                                    });
+                                  }}
+                                />
+                              ) : (
+                                <div className="w-6 h-6 rounded border border-white/20 bg-white/5 flex items-center justify-center flex-shrink-0">
+                                  <ImageIcon className="w-3 h-3 text-white/40" />
+                                </div>
+                              )}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1">
+                                  <span className="font-medium">Asset {index + 1}</span>
+                                  {isGenerating && (
+                                    <Loader2 className="w-2.5 h-2.5 animate-spin text-purple-400 flex-shrink-0" />
+                                  )}
+                                </div>
+                                {prompt.trim() && (
+                                  <span className="block truncate text-white/50 text-[10px]">{prompt}</span>
                                 )}
                               </div>
-                              {prompt.trim() && (
-                                <span className="block truncate text-white/50 text-[10px]">{prompt}</span>
-                              )}
                             </div>
-                          </div>
-                        </button>
+                          </button>
+                          {/* Upload Icon - Top Right */}
+                          {onUploadAsset && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                document.getElementById(assetInputId)?.click();
+                              }}
+                              className="absolute top-0.5 right-0.5 p-0.5 bg-blue-500/80 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity z-10 hover:bg-blue-500"
+                              title="Upload asset"
+                            >
+                              <Upload className="w-2.5 h-2.5" />
+                            </button>
+                          )}
+                        </div>
                       );
                     })}
                     
@@ -345,67 +511,94 @@ export function MiddleSection({
                     {anchorImagePrompts.length === MAX_ANCHOR_ASSETS && (() => {
                       const index = MAX_ANCHOR_ASSETS - 1;
                       const isDragging = draggedIndex === index;
+                      const assetInputId = `asset-upload-${index}`;
                       return (
-                        <button
-                          key={index}
-                          type="button"
-                          draggable
-                          onDragStart={(e) => {
-                            setDraggedIndex(index);
-                            e.dataTransfer.effectAllowed = 'move';
-                            e.dataTransfer.setData('text/plain', index.toString());
-                          }}
-                          onDragEnd={() => {
-                            setDraggedIndex(null);
-                          }}
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            e.dataTransfer.dropEffect = 'move';
-                          }}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            const fromIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
-                            if (fromIndex !== index && !isNaN(fromIndex)) {
-                              onReorderAssets(fromIndex, index);
-                            }
-                            setDraggedIndex(null);
-                          }}
-                          onClick={() => {
-                            onExpandedAssetIndexChange(MAX_ANCHOR_ASSETS - 1);
-                          }}
-                          className={`rounded border text-left px-2 py-1.5 text-xs transition-all cursor-move ${
-                            isDragging ? 'opacity-50' : ''
-                          } ${
-                            expandedAssetIndex === MAX_ANCHOR_ASSETS - 1
-                              ? 'border-blue-500/60 bg-blue-500/20 text-white'
-                              : 'border-white/20 bg-gradient-to-br from-blue-500/10 via-purple-500/8 to-pink-500/5 text-white/70 hover:text-white hover:border-white/40'
-                          }`}
-                        >
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          {generatedAnchorImages.find(img => img.assetNumber === MAX_ANCHOR_ASSETS) ? (
-                            <img
-                              src={generatedAnchorImages.find(img => img.assetNumber === MAX_ANCHOR_ASSETS)!.url}
-                              alt={`Asset ${MAX_ANCHOR_ASSETS}`}
-                              className="w-6 h-6 rounded object-cover flex-shrink-0"
-                            />
-                          ) : (
-                            <div className="w-6 h-6 rounded border border-white/20 bg-white/5 flex items-center justify-center flex-shrink-0">
-                              <ImageIcon className="w-3 h-3 text-white/40" />
-                            </div>
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1">
-                              <span className="font-medium">Asset {MAX_ANCHOR_ASSETS}</span>
-                              {isGeneratingAssets[MAX_ANCHOR_ASSETS - 1] && (
-                                <Loader2 className="w-2.5 h-2.5 animate-spin text-purple-400 flex-shrink-0" />
+                        <div key={index} className="relative group">
+                          <input
+                            id={assetInputId}
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              if (e.target.files && e.target.files.length > 0 && onUploadAsset) {
+                                onUploadAsset(index, e.target.files[0]);
+                                e.target.value = '';
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            draggable
+                            onDragStart={(e) => {
+                              setDraggedIndex(index);
+                              e.dataTransfer.effectAllowed = 'move';
+                              e.dataTransfer.setData('text/plain', index.toString());
+                            }}
+                            onDragEnd={() => {
+                              setDraggedIndex(null);
+                            }}
+                            onDragOver={(e) => {
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = 'move';
+                            }}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              const fromIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                              if (fromIndex !== index && !isNaN(fromIndex)) {
+                                onReorderAssets(fromIndex, index);
+                              }
+                              setDraggedIndex(null);
+                            }}
+                            onClick={() => {
+                              onExpandedAssetIndexChange(MAX_ANCHOR_ASSETS - 1);
+                            }}
+                            className={`rounded border text-left px-2 py-1.5 text-xs transition-all cursor-move w-full ${
+                              isDragging ? 'opacity-50' : ''
+                            } ${
+                              expandedAssetIndex === MAX_ANCHOR_ASSETS - 1
+                                ? 'border-blue-500/60 bg-blue-500/20 text-white'
+                                : 'border-white/20 bg-gradient-to-br from-blue-500/10 via-purple-500/8 to-pink-500/5 text-white/70 hover:text-white hover:border-white/40'
+                            }`}
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {generatedAnchorImages.find(img => img.assetNumber === MAX_ANCHOR_ASSETS) ? (
+                                <img
+                                  src={generatedAnchorImages.find(img => img.assetNumber === MAX_ANCHOR_ASSETS)!.url}
+                                  alt={`Asset ${MAX_ANCHOR_ASSETS}`}
+                                  className="w-6 h-6 rounded object-cover flex-shrink-0"
+                                />
+                              ) : (
+                                <div className="w-6 h-6 rounded border border-white/20 bg-white/5 flex items-center justify-center flex-shrink-0">
+                                  <ImageIcon className="w-3 h-3 text-white/40" />
+                                </div>
                               )}
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1">
+                                  <span className="font-medium">Asset {MAX_ANCHOR_ASSETS}</span>
+                                  {isGeneratingAssets[MAX_ANCHOR_ASSETS - 1] && (
+                                    <Loader2 className="w-2.5 h-2.5 animate-spin text-purple-400 flex-shrink-0" />
+                                  )}
+                                </div>
+                                {anchorImagePrompts[MAX_ANCHOR_ASSETS - 1]?.trim() && (
+                                  <span className="block truncate text-white/50 text-[10px]">{anchorImagePrompts[MAX_ANCHOR_ASSETS - 1]}</span>
+                                )}
+                              </div>
                             </div>
-                            {anchorImagePrompts[MAX_ANCHOR_ASSETS - 1]?.trim() && (
-                              <span className="block truncate text-white/50 text-[10px]">{anchorImagePrompts[MAX_ANCHOR_ASSETS - 1]}</span>
-                            )}
-                          </div>
+                          </button>
+                          {/* Upload Icon - Top Right */}
+                          {onUploadAsset && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                document.getElementById(assetInputId)?.click();
+                              }}
+                              className="absolute top-0.5 right-0.5 p-0.5 bg-blue-500/80 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity z-10 hover:bg-blue-500"
+                              title="Upload asset"
+                            >
+                              <Upload className="w-2.5 h-2.5" />
+                            </button>
+                          )}
                         </div>
-                      </button>
                       );
                     })()}
                     

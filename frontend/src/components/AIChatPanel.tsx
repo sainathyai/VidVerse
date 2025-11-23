@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { MessageCircle, X, Send, Loader2, Minimize2, Sparkles, Copy, ChevronDown, Paperclip, FileText } from 'lucide-react';
 import { apiRequest } from '../lib/api';
 import { useAuth } from './auth/AuthProvider';
+import { extractProjectJSON, normalizeProjectData, validateProjectData } from '../lib/projectImport';
 
 interface AIChatPanelProps {
   projectId?: string;
@@ -292,21 +293,12 @@ Ask me questions to better understand my vision, then provide creative recommend
       // Also check if response contains structured content (code blocks, markdown, etc.)
       const hasStructuredContent = /```|```[\w]*\n|#+\s|^\*\*|^\* /m.test(responseText);
       
-      // Check if response contains structured JSON project data
-      const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
+      // Check if response contains structured JSON project data using helper function
       let structuredProjectData: any = null;
-      if (jsonMatch && jsonMatch[1]) {
-        try {
-          structuredProjectData = JSON.parse(jsonMatch[1]);
-          // Validate it has the expected structure
-          if (structuredProjectData && (structuredProjectData.assets || structuredProjectData.scenes || structuredProjectData.script)) {
-            // Valid structured project data
-          } else {
-            structuredProjectData = null;
-          }
-        } catch (e) {
-          structuredProjectData = null;
-        }
+      const extractedData = extractProjectJSON(responseText);
+      if (extractedData && validateProjectData(extractedData)) {
+        // Normalize the data to ensure it matches UI requirements
+        structuredProjectData = normalizeProjectData(extractedData);
       }
       
       // Show import button if:

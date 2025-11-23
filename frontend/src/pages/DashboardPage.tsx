@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ProtectedRoute } from "../components/auth/ProtectedRoute";
 import { useAuth } from "../components/auth/AuthProvider";
@@ -8,8 +8,189 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { Search, Plus, Film, Zap, CheckCircle2, DollarSign, Star, Calendar, Clock, Edit3, Trash2, ChevronDown, Sparkles, Video } from "lucide-react";
+import { Search, Plus, Film, Zap, CheckCircle2, DollarSign, Star, Calendar, Clock, Edit3, Trash2, ChevronDown, Sparkles, Video, Play } from "lucide-react";
 import { Header } from "../components/Header";
+import { QuickCreateModal } from "../components/QuickCreateModal";
+import { VideoPlayerModal } from "../components/VideoPlayerModal";
+
+// Component to display video thumbnail from database or fallback to generating from video
+function VideoThumbnail({ 
+  thumbnailUrl, 
+  videoUrl, 
+  projectId, 
+  projectName 
+}: { 
+  thumbnailUrl?: string | null; 
+  videoUrl?: string | null; 
+  projectId: string; 
+  projectName: string;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [thumbnailLoaded, setThumbnailLoaded] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const [isVisible, setIsVisible] = useState(false);
+  const [imageError, setImageError] = useState(false);
+
+  // Use Intersection Observer to only load thumbnail when visible
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            setIsVisible(true);
+            observer.disconnect();
+          }
+        });
+      },
+      { rootMargin: '50px' } // Start loading 50px before it becomes visible
+    );
+
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [projectId, thumbnailUrl]);
+
+  // Fallback: Generate thumbnail from video (original behavior)
+  useEffect(() => {
+    // Skip if we have a thumbnail URL from database
+    if (thumbnailUrl && !imageError) {
+      return;
+    }
+    
+    // Skip if no video URL available
+    if (!videoUrl) return;
+    
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    
+    // Only load thumbnail if visible and not already loaded
+    if (!canvas || !video || thumbnailLoaded || !isVisible) return;
+
+    const captureThumbnail = () => {
+      try {
+        if (video.readyState >= 2) {
+          // Video metadata is loaded, capture first frame
+          video.currentTime = 0.1;
+          
+          const handleSeeked = () => {
+            try {
+              const ctx = canvas.getContext('2d');
+              if (ctx && video.videoWidth > 0 && video.videoHeight > 0) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                setThumbnailLoaded(true);
+                video.removeEventListener('seeked', handleSeeked);
+                video.pause();
+                video.currentTime = 0;
+              }
+            } catch (err) {
+              setHasError(true);
+            }
+          };
+
+          video.addEventListener('seeked', handleSeeked, { once: true });
+        }
+      } catch (err) {
+        setHasError(true);
+      }
+    };
+
+    const handleLoadedMetadata = () => {
+      captureThumbnail();
+    };
+
+    const handleError = () => {
+      setHasError(true);
+    };
+
+    // Set video properties first
+    video.crossOrigin = 'anonymous';
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'metadata'; // Load metadata to get first frame
+    
+    // Add event listeners before setting src
+    video.addEventListener('loadedmetadata', handleLoadedMetadata);
+    video.addEventListener('error', handleError);
+    
+    // Set src to trigger loading
+    video.src = videoUrl;
+    video.load(); // Explicitly trigger load
+
+    return () => {
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('error', handleError);
+      // Clear src on cleanup to prevent loading
+      video.src = '';
+    };
+  }, [videoUrl, thumbnailLoaded, isVisible, thumbnailUrl, imageError]);
+
+  // Render based on state - always render the same structure to avoid hooks issues
+  return (
+    <div ref={containerRef} className="w-full h-full relative bg-black">
+      {/* Always render video element (hidden) so refs are available */}
+      <video
+        ref={videoRef}
+        className="hidden"
+        crossOrigin="anonymous"
+        muted
+        playsInline
+        preload="none"
+      />
+      
+      {/* If we have a thumbnail URL from database, use it */}
+      {thumbnailUrl && !imageError ? (
+        <>
+          <img
+            src={thumbnailUrl}
+            alt={`${projectName} thumbnail`}
+            className="w-full h-full object-cover"
+            style={{ display: 'block' }}
+            onError={() => {
+              setImageError(true);
+              // Fall through to video-based thumbnail generation
+            }}
+            onLoad={() => {
+              setThumbnailLoaded(true);
+            }}
+          />
+          {!thumbnailLoaded && (
+            <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-neutral-800 to-neutral-900 z-10">
+              <Video className="w-16 h-16 text-white/20 animate-pulse" />
+            </div>
+          )}
+        </>
+      ) : hasError ? (
+        <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-neutral-800 to-neutral-900">
+          <Video className="w-16 h-16 text-white/20" />
+        </div>
+      ) : (
+        <>
+          {/* Canvas thumbnail */}
+          {thumbnailLoaded ? (
+            <canvas
+              ref={canvasRef}
+              className="w-full h-full object-cover"
+              style={{ display: 'block' }}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-neutral-800 to-neutral-900">
+              <Video className="w-16 h-16 text-white/20" />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 interface Project {
   id: string;
@@ -21,9 +202,13 @@ interface Project {
   cost?: number;
   duration?: number;
   agentic_mode?: boolean;
+  final_video_url?: string; // Database column
+  thumbnail_url?: string; // Database column
   config?: {
     videoUrl?: string;
     finalVideoUrl?: string;
+    thumbnailUrl?: string;
+    sceneUrls?: string[];
     [key: string]: any;
   };
   displayName?: string; // Computed display name (default numbered if no name)
@@ -88,12 +273,24 @@ function DashboardContent() {
   const [statusFilter, setStatusFilter] = useState<string>("completed"); // Default: show completed projects
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
+  const [showQuickCreateModal, setShowQuickCreateModal] = useState(false);
+  const [pendingImportData, setPendingImportData] = useState<any>(null);
+  const [playingVideoId, setPlayingVideoId] = useState<string | null>(null);
+  const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null);
+  const [videoPlayerModal, setVideoPlayerModal] = useState<{ isOpen: boolean; videoUrl: string; projectName: string }>({
+    isOpen: false,
+    videoUrl: '',
+    projectName: '',
+  });
   const { getAccessToken } = useAuth();
 
   useEffect(() => {
     fetchProjects();
-    const interval = setInterval(fetchProjects, 30000);
-    return () => clearInterval(interval);
+    // Refresh every 10 minutes (600000ms) - only fetch when user is actively viewing
+    // Remove auto-refresh to reduce unnecessary API calls
+    // Users can manually refresh if needed
+    // const interval = setInterval(fetchProjects, 600000);
+    // return () => clearInterval(interval);
   }, []);
 
   const fetchProjects = async () => {
@@ -270,12 +467,13 @@ function DashboardContent() {
 
         {/* Action Buttons */}
         <div className="flex items-center gap-3 mb-8 animate-fade-in" style={{ animationDelay: '0.1s' }}>
-          <Button asChild className="bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 text-white border-0 shadow-lg shadow-blue-500/30">
-            <Link to="/create">
-              <Plus className="h-4 w-4 mr-2" />
-              <span className="hidden sm:inline">Quick Create</span>
-              <span className="sm:hidden">Create</span>
-            </Link>
+          <Button 
+            onClick={() => setShowQuickCreateModal(true)}
+            className="bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 text-white border-0 shadow-lg shadow-blue-500/30"
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            <span className="hidden sm:inline">Quick Create</span>
+            <span className="sm:hidden">Create</span>
           </Button>
           <Button asChild variant="outline" className="border-white/20 bg-white/5 backdrop-blur-sm hover:bg-white/10 text-white">
             <Link to="/project/new">
@@ -392,21 +590,94 @@ function DashboardContent() {
               </Card>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {/* New Project Card */}
-                <Card className="border-dashed border-white/20 bg-black/20 backdrop-blur-xl hover:border-blue-500/50 hover:bg-black/30 transition-all cursor-pointer group animate-fade-in overflow-hidden p-0" style={{ animationDelay: '0.4s' }}>
-                  <Link to="/create" className="block">
-                    <div className="relative aspect-video bg-black/50 overflow-hidden flex flex-col items-center justify-center p-8">
-                      <div className="text-5xl mb-4 group-hover:scale-110 transition-transform duration-200 text-white/70">+</div>
-                      <h3 className="text-lg font-semibold text-white mb-1">Quick Create</h3>
-                      <p className="text-sm text-white/50 text-center">Start creating a new video</p>
+                {/* New Project Card - Quick Create */}
+                <Card 
+                  className="border border-white/20 bg-gradient-to-br from-blue-500/10 via-purple-500/8 to-pink-500/5 backdrop-blur-xl hover:border-blue-500/50 hover:from-blue-500/15 hover:via-purple-500/12 hover:to-pink-500/8 transition-all cursor-pointer group animate-fade-in overflow-hidden p-0 shadow-lg shadow-purple-500/10 hover:shadow-purple-500/20" 
+                  style={{ animationDelay: '0.4s' }}
+                  onClick={() => setShowQuickCreateModal(true)}
+                >
+                  <div className="relative aspect-video bg-gradient-to-br from-neutral-900/50 via-neutral-800/40 to-neutral-900/50 overflow-hidden flex flex-col items-center justify-center p-8">
+                    <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 via-purple-500/5 to-pink-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                    <div className="relative z-10 flex flex-col items-center">
+                      <div className="p-3 bg-gradient-to-br from-blue-500/20 to-purple-500/20 backdrop-blur-sm rounded-lg mb-4 group-hover:scale-110 transition-transform duration-200 shadow-lg shadow-blue-500/20">
+                        <Sparkles className="w-6 h-6 text-white/90" />
+                      </div>
+                      <h3 className="text-lg font-semibold text-white mb-1 drop-shadow-lg">Quick Create</h3>
+                      <p className="text-sm text-white/60 text-center">Describe your video concept</p>
                     </div>
-                  </Link>
+                  </div>
                 </Card>
 
                 {/* Existing Projects */}
                 {filteredProjects.map((project, index) => {
-                  // Prefer finalVideoUrl (merged with audio) over videoUrl (stitched without audio)
-                  const videoUrl = project.config?.finalVideoUrl || project.config?.videoUrl;
+                  // Parse config if it's a string
+                  const config = typeof project.config === 'string' 
+                    ? JSON.parse(project.config) 
+                    : (project.config || {});
+                  
+                  // Check for final_video_url in multiple places
+                  const finalVideoUrlFromColumn = (project as any).final_video_url;
+                  const finalVideoUrlFromConfig = config.finalVideoUrl;
+                  const videoUrlFromConfig = config.videoUrl;
+                  const sceneUrls = config.sceneUrls;
+                  
+                  // Check for thumbnail_url in multiple places
+                  const thumbnailUrlFromColumn = (project as any).thumbnail_url;
+                  const thumbnailUrlFromConfig = config.thumbnailUrl;
+                  
+                  // Prefer final_video_url column, then finalVideoUrl in config, then videoUrl, then first scene video
+                  let videoUrl: string | null = null;
+                  
+                  // Priority order: final_video_url column > config.finalVideoUrl > config.videoUrl > first scene video
+                  if (finalVideoUrlFromColumn && typeof finalVideoUrlFromColumn === 'string' && finalVideoUrlFromColumn.trim() !== '') {
+                    videoUrl = finalVideoUrlFromColumn.trim();
+                  } else if (finalVideoUrlFromConfig && typeof finalVideoUrlFromConfig === 'string' && finalVideoUrlFromConfig.trim() !== '') {
+                    videoUrl = finalVideoUrlFromConfig.trim();
+                  } else if (videoUrlFromConfig && typeof videoUrlFromConfig === 'string' && videoUrlFromConfig.trim() !== '') {
+                    videoUrl = videoUrlFromConfig.trim();
+                  } else if (sceneUrls && Array.isArray(sceneUrls) && sceneUrls.length > 0) {
+                    // Use first scene video as fallback
+                    const firstSceneUrl = sceneUrls[0];
+                    if (firstSceneUrl && typeof firstSceneUrl === 'string' && firstSceneUrl.trim() !== '') {
+                      videoUrl = firstSceneUrl.trim();
+                    }
+                  }
+                  
+                  // Get thumbnail URL - prefer thumbnail_url column, then config.thumbnailUrl
+                  let thumbnailUrl: string | null = null;
+                  if (thumbnailUrlFromColumn && typeof thumbnailUrlFromColumn === 'string' && thumbnailUrlFromColumn.trim() !== '') {
+                    thumbnailUrl = thumbnailUrlFromColumn.trim();
+                  } else if (thumbnailUrlFromConfig && typeof thumbnailUrlFromConfig === 'string' && thumbnailUrlFromConfig.trim() !== '') {
+                    thumbnailUrl = thumbnailUrlFromConfig.trim();
+                  }
+                  
+                  // Ensure videoUrl is a complete, valid URL
+                  if (videoUrl) {
+                    if (!videoUrl.startsWith('http://') && !videoUrl.startsWith('https://')) {
+                      console.warn(`[DASHBOARD] Invalid video URL format for ${projectName}:`, {
+                        videoUrl,
+                        videoUrlLength: videoUrl.length,
+                        startsWith: videoUrl.substring(0, 20)
+                      });
+                      videoUrl = null;
+                    } else {
+                      // Validate URL is complete (should end with extension or have query params)
+                      const isComplete = videoUrl.endsWith('.mp4') || 
+                                        videoUrl.endsWith('.mov') || 
+                                        videoUrl.endsWith('.webm') ||
+                                        videoUrl.includes('?') || // Presigned URLs have query params
+                                        videoUrl.includes('X-Amz-Signature'); // AWS presigned URL signature
+                      
+                      if (!isComplete && videoUrl.length < 100) {
+                        console.warn(`[DASHBOARD] Video URL appears incomplete for ${projectName}:`, {
+                          videoUrl,
+                          videoUrlLength: videoUrl.length,
+                          videoUrlEnd: videoUrl.substring(Math.max(0, videoUrl.length - 30))
+                        });
+                      }
+                    }
+                  }
+                  
                   const projectName = project.name || project.displayName || 'Untitled Project';
                   
                   return (
@@ -415,54 +686,117 @@ function DashboardContent() {
                       className="border-white/10 bg-black/20 backdrop-blur-xl hover:border-white/20 hover:bg-black/30 transition-all hover:scale-[1.02] hover:shadow-2xl hover:shadow-blue-500/10 group animate-fade-in overflow-hidden p-0"
                       style={{ animationDelay: `${0.45 + index * 0.05}s` }}
                     >
-                      <div className="relative aspect-video bg-black/50 overflow-hidden cursor-pointer" onClick={() => navigate(`/project/${project.id}`)}>
-                          {/* Video Thumbnail */}
-                          {videoUrl && (
-                            <video
-                              src={videoUrl}
-                              className="w-full h-full object-cover"
-                              muted
-                              playsInline
-                              preload="metadata"
-                              onMouseEnter={(e) => {
-                                // Play video on hover
-                                const video = e.currentTarget;
-                                video.currentTime = 0;
-                                video.play().catch(() => {
-                                  // Ignore autoplay errors
-                                });
-                              }}
-                              onMouseLeave={(e) => {
-                                // Pause video when not hovering
-                                e.currentTarget.pause();
-                              }}
+                      <div 
+                        className="relative aspect-video bg-black/50 overflow-hidden cursor-pointer group/video"
+                        onMouseEnter={() => setHoveredProjectId(project.id)}
+                        onMouseLeave={() => setHoveredProjectId(null)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Open video player modal when clicking thumbnail
+                          if (videoUrl) {
+                            setVideoPlayerModal({
+                              isOpen: true,
+                              videoUrl: videoUrl,
+                              projectName: projectName,
+                            });
+                          }
+                        }}
+                      >
+                          {/* Video Thumbnail - From database or generated from video */}
+                          {videoUrl || thumbnailUrl ? (
+                            <VideoThumbnail 
+                              thumbnailUrl={thumbnailUrl}
+                              videoUrl={videoUrl || null} 
+                              projectId={project.id}
+                              projectName={projectName}
                             />
+                          ) : (
+                            // Placeholder when no video or thumbnail
+                            <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-neutral-800 to-neutral-900">
+                              <Video className="w-16 h-16 text-white/20" />
+                            </div>
                           )}
                           
                           {/* Gradient Overlay for better text readability */}
                           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent" />
                           
+                          {/* Center Play Button - Shows on hover, only the button is clickable */}
+                          {videoUrl && hoveredProjectId === project.id && (
+                            <div 
+                              className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none"
+                            >
+                              <div 
+                                className="w-20 h-20 bg-white/90 backdrop-blur-sm rounded-full flex items-center justify-center shadow-2xl hover:bg-white hover:scale-110 transition-all duration-300 cursor-pointer group/play pointer-events-auto"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  // Ensure videoUrl is a complete, valid URL
+                                  if (!videoUrl || typeof videoUrl !== 'string' || videoUrl.trim() === '') {
+                                    console.error(`[DASHBOARD] Invalid video URL for project ${projectName}:`, videoUrl);
+                                    return;
+                                  }
+                                  
+                                  // Validate URL is complete (should end with file extension or have query params for presigned URLs)
+                                  const trimmedUrl = videoUrl.trim();
+                                  const isComplete = trimmedUrl.endsWith('.mp4') || 
+                                                    trimmedUrl.endsWith('.mov') || 
+                                                    trimmedUrl.endsWith('.webm') ||
+                                                    trimmedUrl.includes('?') || // Presigned URLs have query params
+                                                    trimmedUrl.includes('X-Amz-Signature'); // AWS presigned URL signature
+                                  
+                                  if (!isComplete && trimmedUrl.length < 150) {
+                                    console.warn(`[DASHBOARD] Video URL appears incomplete for ${projectName}:`, {
+                                      videoUrl: trimmedUrl,
+                                      length: trimmedUrl.length,
+                                      endsWith: trimmedUrl.substring(trimmedUrl.length - 20)
+                                    });
+                                  }
+                                  
+                                  // Open video player modal
+                                  setVideoPlayerModal({
+                                    isOpen: true,
+                                    videoUrl: trimmedUrl, // Use full URL, not truncated
+                                    projectName: projectName,
+                                  });
+                                }}
+                              >
+                                <Play className="w-10 h-10 text-black ml-1 group-hover/play:scale-110 transition-transform" fill="black" />
+                              </div>
+                            </div>
+                          )}
+                          
+                          {/* Click overlay to navigate to project (only works when not hovering over buttons) */}
+                          <div 
+                            className="absolute inset-0 z-0 cursor-pointer"
+                            onClick={(e) => {
+                              // Only navigate if clicking on the tile itself, not on buttons
+                              const target = e.target as HTMLElement;
+                              if (!target.closest('button') && !target.closest('[class*="z-40"]') && !target.closest('[class*="z-50"]')) {
+                                navigate(`/project/${project.id}`);
+                              }
+                            }}
+                          />
+                          
                           {/* Project Name Overlay */}
-                          <div className="absolute bottom-0 left-0 right-0 p-4 pb-12">
+                          <div className="absolute bottom-0 left-0 right-0 p-4 pb-12 z-40">
                             <h3 className="text-lg font-bold text-white line-clamp-2 drop-shadow-lg group-hover:text-blue-300 transition-colors">
                               {projectName}
                             </h3>
                           </div>
                           
                           {/* Date Overlay - Bottom Right */}
-                          <div className="absolute bottom-2 right-2 z-10">
+                          <div className="absolute bottom-2 right-2 z-40">
                             <div className="px-2 py-1 bg-black/60 backdrop-blur-sm rounded text-xs text-white/90 drop-shadow-lg">
                               {new Date(project.created_at).toLocaleDateString()}
                             </div>
                           </div>
                           
-                          {/* Status Badge - Top Right */}
-                          <div className="absolute top-2 right-2 z-10">
+                          {/* Status Badge - Bottom Left */}
+                          <div className="absolute bottom-2 left-2 z-40">
                             {getStatusBadge(project.status)}
                           </div>
                           
                           {/* Category and Agentic Badge - Top Left */}
-                          <div className="absolute top-2 left-2 z-10 flex items-center gap-2">
+                          <div className="absolute top-2 left-2 z-40 flex items-center gap-2">
                             <div className="text-xl drop-shadow-lg">{getCategoryIcon(project.category)}</div>
                             {project.agentic_mode && (
                               <div className="px-2 py-0.5 bg-blue-500/80 backdrop-blur-sm rounded text-[10px] text-white flex items-center gap-1">
@@ -472,8 +806,8 @@ function DashboardContent() {
                             )}
                           </div>
                           
-                          {/* Action Buttons - Top Right (on hover, below status badge) */}
-                          <div className="absolute top-10 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2 z-20">
+                          {/* Action Buttons - Top Right (on hover, below status badge) - Higher z-index to be above play button */}
+                          <div className="absolute top-10 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2 z-50">
                             {/* Edit Dropdown */}
                             <div className="relative">
                               <Button 
@@ -494,13 +828,13 @@ function DashboardContent() {
                                 <>
                                   {/* Backdrop to close dropdown */}
                                   <div 
-                                    className="fixed inset-0 z-20" 
+                                    className="fixed inset-0 z-40" 
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       setOpenDropdownId(null);
                                     }}
                                   />
-                                  <div className="absolute top-full right-0 mt-1 w-48 bg-black/95 backdrop-blur-xl border border-white/20 rounded-lg shadow-2xl overflow-hidden z-30">
+                                  <div className="absolute top-full right-0 mt-1 w-48 bg-black/95 backdrop-blur-xl border border-white/20 rounded-lg shadow-2xl overflow-hidden z-50">
                                     <button
                                       onClick={(e) => {
                                         e.stopPropagation();
@@ -556,6 +890,28 @@ function DashboardContent() {
           </>
         )}
       </div>
+
+      {/* Quick Create Modal */}
+      <QuickCreateModal
+        isOpen={showQuickCreateModal}
+        onClose={() => setShowQuickCreateModal(false)}
+        onImportProject={(projectData) => {
+          // Store project data in sessionStorage for SimpleCreatePage to pick up
+          sessionStorage.setItem('quickCreateProjectData', JSON.stringify(projectData));
+          setPendingImportData(projectData);
+        }}
+        onNavigateToCreate={() => {
+          navigate('/create');
+        }}
+      />
+
+      {/* Video Player Modal */}
+      <VideoPlayerModal
+        isOpen={videoPlayerModal.isOpen}
+        onClose={() => setVideoPlayerModal({ isOpen: false, videoUrl: '', projectName: '' })}
+        videoUrl={videoPlayerModal.videoUrl}
+        projectName={videoPlayerModal.projectName}
+      />
     </div>
   );
 }

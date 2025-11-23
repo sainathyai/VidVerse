@@ -241,13 +241,16 @@ function ProjectEditorContent() {
           setStitchedVideo(null);
         }
 
-        // Fetch scenes from API
+        // Fetch scenes from API (URLs from PostgreSQL, prompts from config)
         try {
+          console.log(`[ProjectEditor] Loading scenes for project ${id} - URLs from database, prompts from config`);
           const scenesData = await apiRequest<Scene[]>(`/api/projects/${id}/scenes`, { method: 'GET' }, token);
           if (scenesData && scenesData.length > 0) {
             // Sort by scene number and set scenes
+            // Backend already merges prompts from config, so we use what's returned
             const sortedScenes = scenesData.sort((a, b) => a.sceneNumber - b.sceneNumber);
             setScenes(sortedScenes);
+            console.log(`[ProjectEditor] Loaded ${sortedScenes.length} scenes from database (URLs from PostgreSQL, prompts from config), ${sortedScenes.filter(s => s.videoUrl).length} with videos`);
           } else {
             // Initialize empty scenes if none exist
             const initialScenes: Scene[] = Array.from({ length: 5 }, (_, i) => ({
@@ -257,6 +260,7 @@ function ProjectEditorContent() {
               prompt: `Scene ${i + 1} description...`,
             }));
             setScenes(initialScenes);
+            console.log(`[ProjectEditor] No scenes found in database, initialized empty scenes`);
           }
         } catch (error) {
           console.error('Error loading scenes:', error);
@@ -698,45 +702,88 @@ function ProjectEditorContent() {
             />
             
             <div className="grid grid-cols-2 gap-2">
-              {userAssets.map((asset) => (
-                <div key={asset.id} className="relative group">
-                  <div 
-                    className="aspect-square rounded-lg overflow-hidden bg-white/5 border border-white/10 cursor-pointer hover:opacity-80 hover:border-white/20 transition-all"
-                    onClick={() => openAssetPreview(asset, userAssets)}
-                  >
-                    {asset.thumbnail ? (
-                      <img src={asset.thumbnail} alt={asset.filename} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center">
-                        {asset.type === 'audio' && <Music className="w-8 h-8 text-white/50" />}
-                        {asset.type === 'video' && <Video className="w-8 h-8 text-white/50" />}
-                        {asset.type === 'image' && <ImageIcon className="w-8 h-8 text-white/50" />}
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      try {
-                        const token = await getAccessToken();
-                        // Try to delete from database if it's a UUID (database ID)
-                        // Temporary IDs start with "asset-" followed by timestamp
-                        if (token && asset.id && !asset.id.match(/^asset-\d+$/)) {
-                          await apiRequest(`/api/assets/${asset.id}`, { method: 'DELETE' }, token);
+              {userAssets.map((asset) => {
+                const getAcceptTypes = () => {
+                  switch (asset.type) {
+                    case 'image':
+                      return 'image/*';
+                    case 'video':
+                      return 'video/*';
+                    case 'audio':
+                      return 'audio/*';
+                    default:
+                      return '*/*';
+                  }
+                };
+
+                const assetInputId = `asset-upload-${asset.id}`;
+
+                return (
+                  <div key={asset.id} className="relative group">
+                    <input
+                      id={assetInputId}
+                      type="file"
+                      accept={getAcceptTypes()}
+                      className="hidden"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files.length > 0) {
+                          handleFileUpload(e.target.files, 'asset');
+                          // Reset input so same file can be selected again
+                          e.target.value = '';
                         }
-                        setUserAssets(userAssets.filter(a => a.id !== asset.id));
-                      } catch (error) {
-                        console.error('Error deleting asset:', error);
-                        // Still remove from UI even if delete fails
-                        setUserAssets(userAssets.filter(a => a.id !== asset.id));
-                      }
-                    }}
-                    className="absolute top-1 right-1 p-1 bg-red-500/80 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity z-10 hover:bg-red-500"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              ))}
+                      }}
+                    />
+                    <div 
+                      className="aspect-square rounded-lg overflow-hidden bg-white/5 border border-white/10 cursor-pointer hover:opacity-80 hover:border-white/20 transition-all"
+                      onClick={() => openAssetPreview(asset, userAssets)}
+                    >
+                      {asset.thumbnail ? (
+                        <img src={asset.thumbnail} alt={asset.filename} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          {asset.type === 'audio' && <Music className="w-8 h-8 text-white/50" />}
+                          {asset.type === 'video' && <Video className="w-8 h-8 text-white/50" />}
+                          {asset.type === 'image' && <ImageIcon className="w-8 h-8 text-white/50" />}
+                        </div>
+                      )}
+                    </div>
+                    {/* Upload Icon - Top Right */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        document.getElementById(assetInputId)?.click();
+                      }}
+                      className="absolute top-1 right-8 p-1 bg-blue-500/80 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity z-10 hover:bg-blue-500"
+                      title="Upload new asset"
+                    >
+                      <Upload className="w-3 h-3" />
+                    </button>
+                    {/* Delete Icon - Top Right */}
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        try {
+                          const token = await getAccessToken();
+                          // Try to delete from database if it's a UUID (database ID)
+                          // Temporary IDs start with "asset-" followed by timestamp
+                          if (token && asset.id && !asset.id.match(/^asset-\d+$/)) {
+                            await apiRequest(`/api/assets/${asset.id}`, { method: 'DELETE' }, token);
+                          }
+                          setUserAssets(userAssets.filter(a => a.id !== asset.id));
+                        } catch (error) {
+                          console.error('Error deleting asset:', error);
+                          // Still remove from UI even if delete fails
+                          setUserAssets(userAssets.filter(a => a.id !== asset.id));
+                        }
+                      }}
+                      className="absolute top-1 right-1 p-1 bg-red-500/80 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity z-10 hover:bg-red-500"
+                      title="Delete asset"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })}
               {userAssets.length === 0 && (
                 <div className="col-span-2 text-center py-8 text-white/50 text-sm">
                   No assets uploaded yet
