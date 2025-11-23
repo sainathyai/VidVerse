@@ -3,10 +3,16 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../config';
 
 // Initialize S3 client
-const s3Client = new S3Client({
+const hasCredentials = config.storage.accessKeyId && 
+                       config.storage.accessKeyId.trim() !== '' && 
+                       config.storage.secretAccessKey && 
+                       config.storage.secretAccessKey.trim() !== '';
+
+
+export const s3Client = new S3Client({
   region: config.storage.region,
   endpoint: config.storage.endpoint,
-  credentials: config.storage.accessKeyId && config.storage.secretAccessKey
+  credentials: hasCredentials
     ? {
         accessKeyId: config.storage.accessKeyId,
         secretAccessKey: config.storage.secretAccessKey,
@@ -141,7 +147,6 @@ export async function uploadFile(
   if (config.storage.usePresignedUrls) {
     // Generate presigned URL (24 hour expiration for long-term access)
     url = await generateDownloadUrl(key, 86400); // 24 hours
-    console.log(`[STORAGE] Generated presigned URL for uploaded file: ${key.substring(0, 50)}...`);
   } else {
     // Use public URL if presigned URLs are disabled
     url = config.storage.endpoint
@@ -309,24 +314,34 @@ export async function deleteDraft(
  * 2. https://bucket.s3.region.amazonaws.com/key (virtual-hosted-style)
  * 3. https://endpoint/bucket/key (custom endpoint)
  */
-function extractS3KeyFromUrl(url: string): string | null {
+export function extractS3KeyFromUrl(url: string): string | null {
   const bucket = config.storage.bucketName;
   
   try {
     // Pattern 1: Path-style URL: https://s3.region.amazonaws.com/bucket/key
     // Example: https://s3.us-west-2.amazonaws.com/vidverse-assets/users/...
-    const pathStylePattern = new RegExp(`https://s3[.-]([^.]+)\\.amazonaws\\.com/${bucket}/(.+)`, 'i');
+    const pathStylePattern = new RegExp(`https://s3[.-]([^.]+)\\.amazonaws\\.com/${bucket}/(.+?)(?:\\?|$)`, 'i');
     const pathStyleMatch = url.match(pathStylePattern);
     if (pathStyleMatch && pathStyleMatch[2]) {
-      return decodeURIComponent(pathStyleMatch[2]);
+      // Remove query parameters and handle URL encoding
+      let keyWithQuery = decodeURIComponent(pathStyleMatch[2]);
+      const key = keyWithQuery.split('?')[0].split('%3F')[0].split('%3f')[0];
+      return key;
     }
     
     // Pattern 2: Virtual-hosted-style URL: https://bucket.s3.region.amazonaws.com/key
     // Example: https://vidverse-assets.s3.us-west-2.amazonaws.com/users/...
-    const virtualHostedPattern = new RegExp(`https://${bucket}\\.s3[.-]([^.]+)\\.amazonaws\\.com/(.+)`, 'i');
+    const virtualHostedPattern = new RegExp(`https://${bucket}\\.s3[.-]([^.]+)\\.amazonaws\\.com/(.+?)(?:\\?|$)`, 'i');
     const virtualHostedMatch = url.match(virtualHostedPattern);
     if (virtualHostedMatch && virtualHostedMatch[2]) {
-      return decodeURIComponent(virtualHostedMatch[2]);
+      // Remove query parameters if present and decode URL encoding
+      let keyWithQuery = decodeURIComponent(virtualHostedMatch[2]);
+      // Handle double-encoded URLs (where query params are in the key itself)
+      // Split on first ? to get the actual key
+      const key = keyWithQuery.split('?')[0];
+      // Also handle %3F (encoded ?) in the key
+      const cleanKey = key.split('%3F')[0].split('%3f')[0];
+      return cleanKey;
     }
     
     // Pattern 3: Custom endpoint format: https://endpoint/bucket/key
@@ -340,18 +355,31 @@ function extractS3KeyFromUrl(url: string): string | null {
     }
     
     // Pattern 4: Try to extract key by finding bucket name in URL
-    const bucketIndex = url.indexOf(`/${bucket}/`);
+    // First split on ? to get path part only (removes query string)
+    const pathPart = url.split('?')[0];
+    const bucketIndex = pathPart.indexOf(`/${bucket}/`);
     if (bucketIndex !== -1) {
-      const key = url.substring(bucketIndex + bucket.length + 2);
-      // Remove query parameters if any
-      const keyWithoutQuery = key.split('?')[0];
-      return decodeURIComponent(keyWithoutQuery);
+      let key = pathPart.substring(bucketIndex + bucket.length + 2);
+      // Decode URL encoding (handles %3F, %26, etc.)
+      key = decodeURIComponent(key);
+      // Remove any query params that might be encoded in the key itself
+      // Split on ? (decoded) or %3F/%3f (encoded ?) or %26 (encoded &)
+      key = key.split('?')[0].split('%3F')[0].split('%3f')[0];
+      // Find where query params start (encoded & is %26)
+      const ampIndex = key.indexOf('%26');
+      if (ampIndex > 0) {
+        key = key.substring(0, ampIndex);
+      }
+      // Also check for regular & (in case it wasn't encoded)
+      const regularAmpIndex = key.indexOf('&');
+      if (regularAmpIndex > 0) {
+        key = key.substring(0, regularAmpIndex);
+      }
+      return key;
     }
     
-    console.warn(`[STORAGE] Could not extract S3 key from URL: ${url}`);
     return null;
   } catch (error) {
-    console.error(`[STORAGE] Error extracting S3 key from URL: ${url}`, error);
     return null;
   }
 }
@@ -379,8 +407,34 @@ export async function convertS3UrlToPresigned(
     return url;
   }
   
-  // Skip if already a presigned URL (contains query parameters with signature)
-  if (url.includes('X-Amz-Signature') || url.includes('AWSAccessKeyId')) {
+  // Helper function to check if URL contains PUT presigned URL markers
+  const hasPutObject = url.includes('x-id=PutObject') || 
+                       url.includes('x-id%3DPutObject') || 
+                       url.includes('x-id%3dPutObject') ||
+                       url.includes('%3Fx-id%3DPutObject') ||
+                       url.includes('%3fx-id%3dPutObject');
+  
+  // Check if it's a PUT presigned URL (x-id=PutObject) - these need to be converted to GET
+  if (hasPutObject) {
+    // Extract the S3 key from the URL and generate a new GET presigned URL
+    const key = extractS3KeyFromUrl(url);
+    if (key) {
+      try {
+        const getCommand = new GetObjectCommand({
+          Bucket: config.storage.bucketName,
+          Key: key,
+        });
+        const newPresignedUrl = await getSignedUrl(s3Client, getCommand, { expiresIn });
+        return newPresignedUrl;
+      } catch (error: any) {
+        // If conversion fails, return original URL
+        return url;
+      }
+    }
+  }
+  
+  // Skip if already a GET presigned URL (contains X-Amz-Signature but not PutObject)
+  if (url.includes('X-Amz-Signature') && !hasPutObject) {
     return url;
   }
   
@@ -392,16 +446,26 @@ export async function convertS3UrlToPresigned(
   const key = extractS3KeyFromUrl(url);
   if (!key) {
     // If we can't extract the key, return original URL
-    console.warn(`[STORAGE] Could not extract S3 key from URL: ${url}`);
     return url;
   }
   
   try {
+    // Verify S3 client is configured
+    if (!s3Client) {
+      return url;
+    }
+    
+    // Verify credentials are available
+    const hasAccessKeyId = config.storage.accessKeyId && config.storage.accessKeyId.trim() !== '';
+    const hasSecretAccessKey = config.storage.secretAccessKey && config.storage.secretAccessKey.trim() !== '';
+    
+    if (!hasAccessKeyId || !hasSecretAccessKey) {
+      return url;
+    }
+    
     const presignedUrl = await generateDownloadUrl(key, expiresIn);
-    console.log(`[STORAGE] Generated presigned URL for key: ${key.substring(0, 50)}...`);
     return presignedUrl;
   } catch (error: any) {
-    console.error(`[STORAGE] Error generating presigned URL for key ${key}:`, error?.message || error);
     // Return original URL on error - this allows fallback to public access if bucket is public
     return url;
   }

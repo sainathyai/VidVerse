@@ -1,8 +1,10 @@
 import { FastifyInstance, FastifyPluginOptions } from 'fastify';
-import { generateUploadUrl, uploadFile, generateDownloadUrl } from '../services/storage';
+import { generateUploadUrl, uploadFile, generateDownloadUrl, convertS3UrlToPresigned, s3Client, extractS3KeyFromUrl } from '../services/storage';
 import { getCognitoUser } from '../middleware/cognito';
 import { authenticateCognito } from '../middleware/cognito';
 import { z } from 'zod';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { config } from '../config';
 
 const uploadRequestSchema = z.object({
   filename: z.string(),
@@ -171,14 +173,117 @@ export async function assetRoutes(fastify: FastifyInstance, options: FastifyPlug
       [projectId]
     );
 
-    return assets.map((asset: any) => ({
-      id: asset.id,
-      type: asset.type,
-      url: asset.url,
-      filename: asset.filename || '',
-      thumbnail: asset.type === 'image' ? asset.url : undefined,
-      metadata: asset.metadata || {},
-    }));
+
+    // Convert S3 URLs to presigned URLs
+    const assetsWithPresignedUrls = await Promise.all(
+      assets.map(async (asset: any) => {
+        const originalUrl = asset.url;
+        const presignedUrl = await convertS3UrlToPresigned(originalUrl, 3600);
+        const isPresigned = presignedUrl?.includes('X-Amz-Signature') || presignedUrl?.includes('?X-Amz-');
+        
+        // Removed debug logging for asset URL conversion
+
+        // Parse metadata if it's a string (JSONB can be returned as string)
+        let metadata = asset.metadata || {};
+        if (typeof metadata === 'string') {
+          try {
+            metadata = JSON.parse(metadata);
+          } catch (e) {
+            fastify.log.warn({ assetId: asset.id, metadataString: metadata }, 'Failed to parse asset metadata as JSON');
+            metadata = {};
+          }
+        }
+
+        return {
+          id: asset.id,
+          type: asset.type,
+          url: presignedUrl || originalUrl,
+          filename: asset.filename || '',
+          thumbnail: asset.type === 'image' ? (presignedUrl || originalUrl) : undefined,
+          metadata: metadata,
+        };
+      })
+    );
+
+
+    return assetsWithPresignedUrls;
+  });
+
+  // Proxy endpoint to serve assets with CORS headers (bypasses S3 CORS issues)
+  fastify.get('/assets/:assetId/proxy', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Proxy endpoint to serve assets with CORS headers',
+      tags: ['assets'],
+      params: {
+        type: 'object',
+        required: ['assetId'],
+        properties: {
+          assetId: { type: 'string', format: 'uuid' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { assetId } = request.params as { assetId: string };
+    const user = getCognitoUser(request);
+    const { query } = await import('../services/database');
+
+    // Get asset from database
+    const assets = await query(
+      `SELECT a.id, a.type, a.url, a.project_id, a.mime_type
+       FROM assets a
+       INNER JOIN projects p ON a.project_id = p.id
+       WHERE a.id = $1 AND p.user_id = $2`,
+      [assetId, user.sub]
+    );
+
+    if (!assets || assets.length === 0) {
+      return reply.code(404).send({ error: 'Asset not found' });
+    }
+
+    const asset = assets[0];
+    
+    // Extract S3 key from URL using the shared utility function
+    const url = asset.url;
+    const s3Key = extractS3KeyFromUrl(url);
+    
+    if (!s3Key) {
+      fastify.log.error({ assetId, url: url.substring(0, 200) }, 'Could not extract S3 key from asset URL for proxy');
+      return reply.code(400).send({ error: 'Invalid asset URL - could not extract S3 key' });
+    }
+
+    try {
+      // Fetch file from S3
+      const command = new GetObjectCommand({
+        Bucket: config.storage.bucketName,
+        Key: s3Key,
+      });
+
+      const response = await s3Client.send(command);
+      
+      if (!response.Body) {
+        return reply.code(404).send({ error: 'Asset file not found in S3' });
+      }
+
+      // Convert stream to buffer
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of response.Body as any) {
+        chunks.push(chunk);
+      }
+      const buffer = Buffer.concat(chunks);
+
+      // Set CORS headers
+      reply.header('Access-Control-Allow-Origin', '*');
+      reply.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+      reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      reply.header('Content-Type', asset.mime_type || response.ContentType || 'application/octet-stream');
+      reply.header('Cache-Control', 'public, max-age=3600');
+
+      return reply.send(buffer);
+    } catch (error: any) {
+      fastify.log.error({ assetId, s3Key, error: error.message, stack: error.stack }, 'Failed to proxy asset from S3');
+      return reply.code(500).send({ error: 'Failed to retrieve asset' });
+    }
   });
 
   // Save asset for a project

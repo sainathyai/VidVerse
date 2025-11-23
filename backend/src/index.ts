@@ -29,6 +29,7 @@ if (config.sentry.dsn) {
 }
 
 const fastify = Fastify({
+  disableRequestLogging: true,
   logger: {
     level: config.logLevel,
     transport: config.nodeEnv === 'development' ? {

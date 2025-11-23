@@ -3,11 +3,27 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const parseBoolean = (value?: string, defaultValue = false): boolean => {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return defaultValue;
   }
 
-  return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+  // Handle empty string - treat as undefined
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    return defaultValue;
+  }
+
+  // Remove quotes if present (dotenv sometimes includes them)
+  const unquoted = trimmed.replace(/^["']|["']$/g, '');
+  const lower = unquoted.toLowerCase();
+
+  // Explicitly check for false values
+  if (['0', 'false', 'no', 'off', 'disabled'].includes(lower)) {
+    return false;
+  }
+
+  // Check for true values
+  return ['1', 'true', 'yes', 'on', 'enabled'].includes(lower);
 };
 
 const normalizeOrigins = (value: string | undefined, fallback: string, isDevelopment: boolean): readonly string[] => {

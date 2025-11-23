@@ -379,7 +379,10 @@ async function prepareImageUrlForReplicate(
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        console.warn(`[REPLICATE] ${urlType} URL is not accessible (HTTP ${response.status}): ${presignedUrl.substring(0, 100)}`);
+        // Only log at debug level to reduce noise
+        if (response.status !== 403) {
+          console.warn(`[REPLICATE] ${urlType} URL is not accessible (HTTP ${response.status}): ${presignedUrl.substring(0, 100)}`);
+        }
         return null;
       }
 
@@ -390,7 +393,7 @@ async function prepareImageUrlForReplicate(
         // Still return URL - some servers don't set content-type correctly
       }
 
-      console.log(`[REPLICATE] Successfully validated ${urlType} URL (${response.status}, ${contentType || 'unknown type'}): ${presignedUrl.substring(0, 100)}...`);
+      // Reduced logging - only log on debug
       return presignedUrl;
     } catch (fetchError: any) {
       clearTimeout(timeoutId);
@@ -933,16 +936,16 @@ export async function generateVideo(
                     console.log(`[REPLICATE] This is a VIDEO EXTENSION call - will extend the previous video clip using video ID`);
                   } else {
                     // It's a URL - prepare it (convert to presigned if needed)
-                    console.log(`[REPLICATE] Preparing video URL for Veo 3.1 extension - Original URL: ${options.video.substring(0, 150)}`);
+                    console.log(`[REPLICATE] Preparing video URL for Veo 3.1 extension - Original URL: ${options.video}`);
                     const preparedVideoUrl = await prepareImageUrlForReplicate(options.video, 'video');
                     if (preparedVideoUrl) {
                       modelInput.video = preparedVideoUrl;
                       const isPresigned = preparedVideoUrl.includes('X-Amz-Signature') || preparedVideoUrl.includes('AWSAccessKeyId');
-                      console.log(`[REPLICATE] Adding video parameter for Veo 3.1 extension - Presigned URL: ${preparedVideoUrl.substring(0, 150)}...`);
+                      console.log(`[REPLICATE] Adding video parameter for Veo 3.1 extension - Presigned URL: ${preparedVideoUrl}`);
                       console.log(`[REPLICATE] Video URL is presigned: ${isPresigned ? 'YES' : 'NO'}`);
                       console.log(`[REPLICATE] This is a VIDEO EXTENSION call - will extend the previous video clip using video URL`);
                     } else {
-                      console.warn(`[REPLICATE] Skipping video parameter for Veo 3.1 - URL validation/conversion failed: ${options.video.substring(0, 100)}`);
+                      console.warn(`[REPLICATE] Skipping video parameter for Veo 3.1 - URL validation/conversion failed: ${options.video}`);
                     }
                   }
                 }
@@ -978,25 +981,19 @@ export async function generateVideo(
                   const preparedUrl = await prepareImageUrlForReplicate(refImageUrl, 'reference_image');
                   if (preparedUrl) {
                     preparedReferenceImages.push(preparedUrl);
-                  } else {
-                    console.warn(`[REPLICATE] Skipping reference image - URL validation/conversion failed: ${refImageUrl.substring(0, 100)}`);
                   }
+                  // Silently skip invalid reference images to reduce log noise
                 }
                 
                 if (preparedReferenceImages.length > 0) {
                   modelInput.reference_images = preparedReferenceImages;
-                  console.log(`[REPLICATE] Adding reference_images parameter for Veo 3.1: ${preparedReferenceImages.length} reference image(s)`);
-                  console.log(`[REPLICATE] Reference images URLs: ${preparedReferenceImages.map(url => url.substring(0, 100) + '...').join(', ')}`);
-                } else {
-                  console.warn(`[REPLICATE] No valid reference images after preparation - skipping reference_images parameter`);
+                  console.log(`[REPLICATE] Adding ${preparedReferenceImages.length} reference image(s) for Veo 3.1`);
                 }
+                // Silently skip if no valid reference images
               }
             }
             
-            console.log(`[REPLICATE] Adding Veo 3 parameters: aspect_ratio=${modelInput.aspect_ratio}, duration=${modelInput.duration}, resolution=${modelInput.resolution || 'default'}, generate_audio=${modelInput.generate_audio}`);
-            
-            // Log the complete input object for debugging
-            console.log(`[REPLICATE] Complete Veo 3.1 input object:`, JSON.stringify(modelInput, null, 2));
+            console.log(`[REPLICATE] Veo 3.1: aspect_ratio=${modelInput.aspect_ratio}, duration=${modelInput.duration}, generate_audio=${modelInput.generate_audio}`);
           } else if (isKling) {
             // Kling 2.5 Turbo Pro format: prompt, aspect_ratio, duration, start_image (optional), negative_prompt (optional)
             // Normalize aspect ratio to "W:H" format (e.g., "16:9", "9:16", "1:1")
@@ -1040,34 +1037,8 @@ export async function generateVideo(
           // Use model ID directly (Replicate SDK handles version resolution)
           const modelIdToUse = model.id;
           
-          // Log the complete request payload for debugging
-          console.log(`[REPLICATE] ========== COMPLETE API REQUEST PAYLOAD ==========`);
-          console.log(`[REPLICATE] Model: ${modelIdToUse}`);
-          console.log(`[REPLICATE] Full Input JSON:`, JSON.stringify(modelInput, null, 2));
-          console.log(`[REPLICATE] PROMPT DETAILS:`, {
-            promptLength: modelInput.prompt?.length || 0,
-            promptFirst500: modelInput.prompt?.substring(0, 500) || '',
-            promptLast500: modelInput.prompt && modelInput.prompt.length > 500 ? modelInput.prompt.substring(modelInput.prompt.length - 500) : modelInput.prompt || '',
-            promptFull: modelInput.prompt || '',
-          });
-          console.log(`[REPLICATE] Input Summary:`, {
-            promptLength: modelInput.prompt?.length || 0,
-            aspect_ratio: modelInput.aspect_ratio,
-            duration: modelInput.duration,
-            resolution: modelInput.resolution,
-            generate_audio: modelInput.generate_audio,
-            hasLastFrame: !!modelInput.last_frame,
-            lastFrameUrl: modelInput.last_frame ? (modelInput.last_frame.substring(0, 100) + '...') : null,
-            hasImage: !!modelInput.image,
-            imageUrl: modelInput.image ? (modelInput.image.substring(0, 100) + '...') : null,
-            hasReferenceImages: !!modelInput.reference_images && Array.isArray(modelInput.reference_images) && modelInput.reference_images.length > 0,
-            referenceImagesCount: modelInput.reference_images && Array.isArray(modelInput.reference_images) ? modelInput.reference_images.length : 0,
-            hasNegativePrompt: !!modelInput.negative_prompt,
-            hasSeed: modelInput.seed !== undefined,
-          });
-          console.log(`[REPLICATE] ==================================================`);
-          
-          console.log(`[REPLICATE] Calling replicate.run("${modelIdToUse}", { input: ${JSON.stringify(modelInput)} })`);
+          // Reduced logging - only log essential info
+          console.log(`[REPLICATE] Running model ${modelIdToUse} with prompt length ${modelInput.prompt?.length || 0}`);
           
           // replicate.run() returns a file-like object or URL string
           // For video models, it typically returns a file-like object with .url() method
@@ -1834,21 +1805,39 @@ export async function generateMusic(
   const model = 'minimax/music-1.5';
   
   // Validate input parameters according to model requirements
-  // Lyrics: required string
-  // Prompt: required string (style description)
+  // Lyrics: required string (10-600 characters)
+  // Prompt: required string (style description, 10-300 characters)
   const validatedLyrics = lyrics.trim();
-  const validatedPrompt = (prompt || 'Jazz, Smooth Jazz, Romantic, Dreamy').trim();
+  let validatedPrompt = (prompt || 'Jazz, Smooth Jazz, Romantic, Dreamy').trim();
 
   if (!validatedLyrics || validatedLyrics.length === 0) {
     throw new Error(`Lyrics is required and cannot be empty`);
   }
 
+  if (validatedLyrics.length < 10 || validatedLyrics.length > 600) {
+    throw new Error(`Lyrics must be between 10-600 characters, got ${validatedLyrics.length}`);
+  }
+
   if (!validatedPrompt || validatedPrompt.length === 0) {
     throw new Error(`Prompt is required and cannot be empty`);
   }
+
+  // Validate and adjust prompt length (10-300 characters)
+  // Keep only style description, remove any extra text
+  const originalPromptLength = validatedPrompt.length;
+  if (validatedPrompt.length < 10) {
+    // If too short, use default
+    validatedPrompt = 'Jazz, Smooth Jazz, Romantic, Dreamy';
+    console.warn(`[REPLICATE] Prompt too short (${originalPromptLength} chars), using default style`);
+  } else if (validatedPrompt.length > 300) {
+    // If too long, truncate to 300 characters
+    validatedPrompt = validatedPrompt.substring(0, 300).trim();
+    console.warn(`[REPLICATE] Prompt too long (${originalPromptLength} chars), truncated to 300 characters`);
+  }
   
   console.log(`[REPLICATE] Generating music with model ${model}`);
-  console.log(`[REPLICATE] Lyrics length: ${validatedLyrics.length}`);
+  console.log(`[REPLICATE] Lyrics length: ${validatedLyrics.length} characters`);
+  console.log(`[REPLICATE] Prompt length: ${validatedPrompt.length} characters (validated)`);
   console.log(`[REPLICATE] Prompt: ${validatedPrompt}`);
   console.log(`[REPLICATE] Options:`, options);
 

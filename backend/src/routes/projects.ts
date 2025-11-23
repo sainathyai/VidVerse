@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getCognitoUser, authenticateCognito } from '../middleware/cognito';
 import { query, queryOne } from '../services/database';
 import { saveDraft, loadDraft, deleteDraft, convertS3UrlToPresigned } from '../services/storage';
+import { config } from '../config';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
@@ -247,12 +248,37 @@ export async function projectRoutes(fastify: FastifyInstance, options: FastifyPl
         targetCharsPerScene: finalTargetCharsPerScene,
       }, 'Calculated target script length based on input');
 
+      // Calculate minimum scenes needed (max 8 seconds per scene)
+      const MAX_SCENE_DURATION = 8;
+      const minScenesNeeded = Math.ceil(videoDuration / MAX_SCENE_DURATION);
+      const recommendedScenes = Math.max(minScenesNeeded, Math.ceil(videoDuration / 6)); // Aim for 6-8 seconds per scene
+
       // Simplified system prompt - just request the JSON structure
       const systemPrompt = `You are a video script writer. Create a detailed video script in JSON format.
 
-Generate approximately ${finalTargetWords} words (${finalTargetLength} characters) total. Break the video into multiple scenes (typically 5-10 scenes for a ${videoDuration}-second video).
+Generate approximately ${finalTargetWords} words (${finalTargetLength} characters) total. Break the video into multiple scenes.
 
-Each scene prompt should be detailed (approximately ${finalTargetCharsPerScene} characters) with visual descriptions, camera movements, lighting, and composition details.
+CRITICAL SCENE PLANNING:
+- Each scene must be MAXIMUM 8 seconds long
+- Minimum scenes needed: ${minScenesNeeded} scenes (${videoDuration} seconds ÷ 8 seconds per scene)
+- Recommended: ${recommendedScenes} scenes for optimal pacing
+- Each scene duration must be ≤ 8 seconds
+- Scene durations must add up to exactly ${videoDuration} seconds
+
+CONSISTENCY REQUIREMENTS:
+- Establish a consistent theme and visual style in the first scene
+- Maintain the same camera style throughout all scenes (e.g., if using "cinematic wide shots", use that consistently)
+- Keep consistent color palette, lighting approach, and visual aesthetic across all scenes
+- Ensure characters and objects maintain consistent appearance throughout
+- Create smooth visual transitions between scenes
+
+SCENE PROMPT REQUIREMENTS:
+- Each scene prompt must be EXTENSIVE (400-600+ characters minimum, approximately ${finalTargetCharsPerScene} characters)
+- Include detailed visual descriptions: camera angles, movements, framing
+- Specify lighting conditions, color palette, and mood
+- Describe environmental details, character positioning, and actions
+- Include consistency notes referencing the established theme and camera style
+- Add visual details that ensure continuity with previous scenes
 
 Output ONLY valid JSON in this exact format:
 {
@@ -267,7 +293,7 @@ Output ONLY valid JSON in this exact format:
   "scenes": [
     {
       "sceneNumber": 1,
-      "prompt": "Detailed scene description with visual details",
+      "prompt": "EXTENSIVE scene description (400-600+ characters) with visual details, camera style, lighting, composition, and consistency notes",
       "duration": X.X,
       "startTime": X.X,
       "endTime": X.X
@@ -275,7 +301,7 @@ Output ONLY valid JSON in this exact format:
   ]
 }
 
-Scene durations must add up to exactly ${videoDuration} seconds.`;
+Scene durations must add up to exactly ${videoDuration} seconds, and each scene must be ≤ 8 seconds.`;
 
       // Simplified user prompt
       const userPrompt = `Create a detailed video script for this concept:
@@ -286,7 +312,14 @@ Duration: ${videoDuration} seconds
 ${config.style ? `Style: ${config.style}` : ''}
 ${config.mood ? `Mood: ${config.mood}` : ''}
 
-Generate approximately ${finalTargetWords} words (${finalTargetLength} characters) total. Break into multiple scenes with detailed visual descriptions. Return ONLY valid JSON.`;
+CRITICAL REQUIREMENTS:
+- Generate ${recommendedScenes} scenes (each scene must be ≤ 8 seconds, total duration = ${videoDuration} seconds)
+- Each scene prompt must be 400-600+ characters with extensive visual details
+- Establish consistent theme and camera style in scene 1, maintain throughout all scenes
+- Include detailed camera angles, lighting, color palette, and visual consistency notes in each scene
+- Ensure smooth transitions and visual continuity between scenes
+
+Generate approximately ${finalTargetWords} words (${finalTargetLength} characters) total. Break into multiple scenes with EXTENSIVE visual descriptions. Return ONLY valid JSON.`;
 
       // Call OpenRouter API with Claude Sonnet 4.5
       // Add timeout to prevent hanging (3 minutes for large script generation)
@@ -1370,7 +1403,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
               sceneNumber: scene.sceneNumber,
               outputType: 'string',
               urlLength: videoUrl.length,
-              url: videoUrl.substring(0, 100) + '...',
+              url: videoUrl,
             }, `Step 3.${i + 1}: Using string output as video URL`);
           } else if (Array.isArray(normalizedOutput)) {
             // Array of URLs - take the first one
@@ -1380,7 +1413,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
               sceneNumber: scene.sceneNumber,
               outputType: 'array',
               arrayLength: normalizedOutput.length,
-              url: videoUrl.substring(0, 100) + '...',
+              url: videoUrl,
             }, `Step 3.${i + 1}: Extracted video URL from array output`);
           } else if (normalizedOutput && typeof normalizedOutput === 'object') {
             // Object - try to extract URL from common properties
@@ -1392,7 +1425,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
                 projectId, 
                 sceneNumber: scene.sceneNumber,
                 outputType: 'String-object',
-                url: videoUrl.substring(0, 100) + '...',
+                url: videoUrl,
               }, `Step 3.${i + 1}: Converted String object to primitive string URL`);
             } else if ('url' in normalizedOutput && typeof (normalizedOutput as any).url === 'string') {
               videoUrl = (normalizedOutput as any).url;
@@ -1409,7 +1442,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
                   projectId, 
                   sceneNumber: scene.sceneNumber,
                   outputType: 'object-converted-to-string',
-                  url: videoUrl.substring(0, 100) + '...',
+                  url: videoUrl,
                 }, `Step 3.${i + 1}: Converted object to string URL`);
               } else {
                 fastify.log.error({ 
@@ -1428,7 +1461,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
                 projectId, 
                 sceneNumber: scene.sceneNumber,
                 outputType: 'object',
-                url: videoUrl.substring(0, 100) + '...',
+                url: videoUrl,
               }, `Step 3.${i + 1}: Extracted video URL from object output`);
             }
           } else {
@@ -1440,7 +1473,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
                 projectId, 
                 sceneNumber: scene.sceneNumber,
                 outputType: typeof normalizedOutput,
-                url: videoUrl.substring(0, 100) + '...',
+                url: videoUrl,
               }, `Step 3.${i + 1}: Converted output to string URL as fallback`);
             } else {
               fastify.log.error({ 
@@ -1535,7 +1568,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             assetId: assetId || 'N/A',
             model: selectedVideoModelId,
             hasVideoObject: !!result.videoObject,
-            videoUrl: videoUrl.substring(0, 100) + '...',
+            videoUrl: videoUrl,
           }, `Step 3.${i + 1}: Stored video ID/object/GCS URI for extension`);
 
           // Extract frames (non-blocking - if it fails, we still save the scene)
@@ -1626,7 +1659,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
           projectId, 
           error: concatError.message,
           sceneVideoCount: sceneVideos.length,
-          sceneVideos: sceneVideos.map((url, idx) => ({ index: idx, url: url.substring(0, 100) }))
+          sceneVideos: sceneVideos.map((url, idx) => ({ index: idx, url: url }))
         }, 'Step 4: ERROR - Failed to concatenate videos');
         throw new Error(`Failed to concatenate videos: ${concatError.message}`);
       }
@@ -1698,10 +1731,35 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       };
 
       const configJson = JSON.stringify(updatedConfig);
-      await query(
-        'UPDATE projects SET status = $1, config = $2 WHERE id = $3',
-        ['completed', configJson, projectId]
-      );
+      
+      // Update project with final video URL in both config and final_video_url column
+      try {
+        await query(
+          `UPDATE projects 
+           SET final_video_url = $1,
+               status = 'completed',
+               config = $2,
+               updated_at = NOW()
+           WHERE id = $3`,
+          [uploadResult.url, configJson, projectId]
+        );
+        fastify.log.info({ projectId, finalVideoUrl: uploadResult.url }, 'Step 7: Updated final_video_url column and status to completed');
+      } catch (dbError: any) {
+        // If final_video_url column doesn't exist, just update config and status
+        if (dbError.message && dbError.message.includes('final_video_url')) {
+          fastify.log.warn({ projectId, error: dbError.message }, 'Step 7: final_video_url column does not exist, updating config and status only');
+          await query(
+            'UPDATE projects SET status = $1, config = $2, updated_at = NOW() WHERE id = $3',
+            ['completed', configJson, projectId]
+          );
+        } else {
+          fastify.log.error({ projectId, error: dbError.message }, 'Step 7: Failed to update final_video_url column, updating config and status only');
+          await query(
+            'UPDATE projects SET status = $1, config = $2, updated_at = NOW() WHERE id = $3',
+            ['completed', configJson, projectId]
+          );
+        }
+      }
       
       // Verify the update was successful
       const verifyProject = await queryOne(
@@ -1946,7 +2004,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         projectId,
         sceneIndex: requestBody.sceneIndex,
         hasPreviousVideoUrl: !!requestBody.previousSceneVideoUrl,
-        previousVideoUrl: requestBody.previousSceneVideoUrl ? requestBody.previousSceneVideoUrl.substring(0, 100) + '...' : 'N/A',
+        previousVideoUrl: requestBody.previousSceneVideoUrl || 'N/A',
         hasPreviousLastFrame: !!requestBody.previousSceneLastFrame,
         useReferenceFrame: requestBody.useReferenceFrame,
         hasReferenceImages: !!requestBody.referenceImages && requestBody.referenceImages.length > 0,
@@ -1958,9 +2016,9 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         fastify.log.info({
           projectId,
           sceneIndex: requestBody.sceneIndex,
-          previousVideoUrl: requestBody.previousSceneVideoUrl.substring(0, 100) + '...',
+          previousVideoUrl: requestBody.previousSceneVideoUrl,
           model: selectedVideoModelId,
-          videoGenOptionsVideo: videoGenOptions.video?.substring(0, 100) + '...',
+          videoGenOptionsVideo: videoGenOptions.video,
         }, 'Using previous scene video URL for extension - added to videoGenOptions.video');
         
         // Don't add reference_images when using video parameter (Veo 3.1 doesn't support both)
@@ -2030,7 +2088,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         hasReferenceFrame: !!requestBody.previousSceneLastFrame && requestBody.useReferenceFrame,
         videoGenOptionsHasVideo: !!videoGenOptions.video,
         videoGenOptionsHasImage: !!videoGenOptions.image,
-        videoGenOptionsVideo: videoGenOptions.video ? (typeof videoGenOptions.video === 'string' ? videoGenOptions.video.substring(0, 100) + '...' : 'object') : 'N/A',
+        videoGenOptionsVideo: videoGenOptions.video || 'N/A',
       }, 'Generating single scene video - calling Replicate API with videoGenOptions');
 
       // Generate video
@@ -2105,7 +2163,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             projectId, 
             sceneNumber, 
             sceneIndex: requestBody.sceneIndex,
-            videoUrl: videoUrl.substring(0, 100) + '...',
+            videoUrl: videoUrl,
             hasFirstFrame: !!frames.firstFrameUrl,
             hasLastFrame: !!frames.lastFrameUrl,
           }, 'Updated existing scene in database');
@@ -2121,7 +2179,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             projectId, 
             sceneNumber,
             sceneIndex: requestBody.sceneIndex,
-            videoUrl: videoUrl.substring(0, 100) + '...',
+            videoUrl: videoUrl,
             hasFirstFrame: !!frames.firstFrameUrl,
             hasLastFrame: !!frames.lastFrameUrl,
           }, 'Inserted new scene into database');
@@ -2387,8 +2445,8 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
                 projectId, 
                 sceneIndex, 
                 sceneNumber,
-                oldVideoUrl: existingScene[0].video_url ? existingScene[0].video_url.substring(0, 100) + '...' : 'none',
-                newVideoUrl: uploadResult.url.substring(0, 100) + '...'
+                oldVideoUrl: existingScene[0].video_url || 'none',
+                newVideoUrl: uploadResult.url
               }, 'Updated existing scene with new video (parallel mode)');
             } else {
               // Insert new scene
@@ -2516,7 +2574,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
               fastify.log.info({
                 projectId,
                 sceneIndex,
-                previousVideoUrl: previousSceneResult.videoUrl.substring(0, 100) + '...',
+                previousVideoUrl: previousSceneResult.videoUrl,
               }, 'Using previous scene video for extendPrevious (sequential mode)');
               
               // Don't add reference_images when using video parameter
@@ -2633,8 +2691,8 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
                   projectId, 
                   sceneIndex, 
                   sceneNumber,
-                  oldVideoUrl: existingScene[0].video_url ? existingScene[0].video_url.substring(0, 100) + '...' : 'none',
-                  newVideoUrl: uploadResult.url.substring(0, 100) + '...'
+                  oldVideoUrl: existingScene[0].video_url || 'none',
+                  newVideoUrl: uploadResult.url
                 }, 'Updated existing scene with new video (sequential mode)');
               } else {
                 // Insert new scene
@@ -2706,7 +2764,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
 
             // Cleanup temp directory
             await fs.rm(tempDir, { recursive: true, force: true });
-            fastify.log.info({ projectId, finalVideoUrl: finalVideoUrl.substring(0, 100) + '...' }, 'Final stitched video uploaded successfully');
+            fastify.log.info({ projectId, finalVideoUrl: finalVideoUrl }, 'Final stitched video uploaded successfully');
           } else {
             fastify.log.warn({ projectId }, 'No valid scene video URLs to stitch');
           }
@@ -2718,7 +2776,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         fastify.log.warn({ projectId, sceneResultsCount: sceneResults.length }, 'No scene results to stitch');
       }
 
-      // Save final video URL to database and config (if stitching succeeded)
+      // Save final video URL to database and config, and mark project as completed (if stitching succeeded)
       if (finalVideoUrl) {
         const { query } = await import('../services/database');
         
@@ -2729,37 +2787,51 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         currentConfig.finalVideoUrl = finalVideoUrl;
         currentConfig.videoUrl = finalVideoUrl; // Also save as videoUrl for compatibility
         
-        // Try to update final_video_url column if it exists, otherwise just update config
+        // Try to update final_video_url column and mark as completed
         try {
           await query(
             `UPDATE projects 
              SET final_video_url = $1, 
+                 status = 'completed',
                  config = $2, 
                  updated_at = NOW() 
              WHERE id = $3`,
             [finalVideoUrl, JSON.stringify(currentConfig), projectId]
           );
         } catch (dbError: any) {
-          // If final_video_url column doesn't exist, just update config
+          // If final_video_url column doesn't exist, just update config and status
           if (dbError.message && dbError.message.includes('final_video_url')) {
-            fastify.log.warn({ projectId, error: dbError.message }, 'final_video_url column does not exist, updating config only');
+            fastify.log.warn({ projectId, error: dbError.message }, 'final_video_url column does not exist, updating config and status only');
             await query(
               `UPDATE projects 
-               SET config = $1, 
+               SET status = 'completed',
+                   config = $1, 
                    updated_at = NOW() 
                WHERE id = $2`,
               [JSON.stringify(currentConfig), projectId]
             );
           } else {
             fastify.log.error({ projectId, error: dbError.message }, 'Failed to save final video URL to database');
-            // Don't throw - scenes were generated successfully
+            // Don't throw - scenes were generated successfully, but try to mark as completed anyway
+            try {
+              await query(
+                `UPDATE projects 
+                 SET status = 'completed',
+                     updated_at = NOW() 
+                 WHERE id = $1`,
+                [projectId]
+              );
+            } catch (statusError: any) {
+              fastify.log.error({ projectId, error: statusError.message }, 'Failed to mark project as completed');
+            }
           }
         }
 
         fastify.log.info({ 
           projectId, 
-          finalVideoUrl: finalVideoUrl.substring(0, 100) + '...' 
-        }, 'Final video generated, uploaded, and saved to database successfully');
+          finalVideoUrl: finalVideoUrl,
+          status: 'completed'
+        }, 'Final video generated, uploaded to S3, saved to database, and project marked as completed');
       }
 
       return {
@@ -2847,7 +2919,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       const videoUrlToDownload = await convertS3UrlToPresigned(config.videoUrl, 3600) || config.videoUrl;
       
       // Download current video
-      fastify.log.info({ projectId, videoUrl: videoUrlToDownload.substring(0, 100) }, 'Downloading video for audio merge');
+      fastify.log.info({ projectId, videoUrl: videoUrlToDownload }, 'Downloading video for audio merge');
       const videoResponse = await fetch(videoUrlToDownload);
       if (!videoResponse.ok) {
         throw new Error(`Failed to download video: ${videoResponse.status} ${videoResponse.statusText}`);
@@ -3260,7 +3332,15 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
               prompt: { type: 'string' },
               status: { type: 'string' },
               created_at: { type: 'string' },
+              final_video_url: { type: ['string', 'null'] },
+              thumbnail_url: { type: ['string', 'null'] },
+              music_url: { type: ['string', 'null'] },
+              config: { 
+                type: ['object', 'null'],
+                additionalProperties: true
+              },
             },
+            additionalProperties: true, // Allow other fields that might exist
           },
         },
       },
@@ -3273,27 +3353,111 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       fastify.log.info({ userId }, 'Fetching projects for user');
 
       // Get all projects for user from database
+      // Use SELECT * to get all available columns (handles missing columns gracefully)
+      // Note: PostgreSQL returns column names in lowercase by default
       const projects = await query(
         `SELECT * FROM projects WHERE user_id = $1 ORDER BY created_at DESC`,
         [userId]
       );
+      
+      fastify.log.info({ 
+        userId, 
+        projectCount: projects.length
+      }, 'Fetched projects from database');
 
-      // Convert S3 URLs in config to presigned URLs for secure access
+      // Convert S3 URLs in config and database columns to presigned URLs for secure access
       const projectsWithPresignedUrls = await Promise.all(
         projects.map(async (project: any) => {
+          // Convert final_video_url column to presigned URL if it exists (preferred source)
+          // Check for null, undefined, and empty string explicitly
+          if (project.final_video_url !== null && project.final_video_url !== undefined && project.final_video_url !== '') {
+            try {
+              // Convert to presigned URL silently (only log errors)
+              project.final_video_url = await convertS3UrlToPresigned(project.final_video_url, 3600);
+              
+              // Also add to config for backward compatibility
+              if (!project.config) {
+                project.config = {};
+              }
+              const config = typeof project.config === 'string' 
+                ? JSON.parse(project.config) 
+                : (project.config || {});
+              config.finalVideoUrl = project.final_video_url;
+              // Keep config as object if it was already an object, or stringify if it was a string
+              project.config = typeof project.config === 'string' ? JSON.stringify(config) : config;
+            } catch (error: any) {
+              fastify.log.warn({ projectId: project.id, error: error.message }, 'Failed to convert final_video_url to presigned URL');
+            }
+          }
+          
+          // Convert thumbnail_url column to presigned URL if it exists (preferred source)
+          if (project.thumbnail_url !== null && project.thumbnail_url !== undefined && project.thumbnail_url !== '') {
+            try {
+              const originalThumbnailUrl = project.thumbnail_url;
+              const convertedUrl = await convertS3UrlToPresigned(project.thumbnail_url, 3600);
+              
+              if (convertedUrl && convertedUrl !== originalThumbnailUrl) {
+                project.thumbnail_url = convertedUrl;
+              } else {
+                // URL is already a presigned URL or public URL, keep as is
+                project.thumbnail_url = convertedUrl || originalThumbnailUrl;
+              }
+              
+              // Also add to config for backward compatibility
+              if (!project.config) {
+                project.config = {};
+              }
+              const config = typeof project.config === 'string' 
+                ? JSON.parse(project.config) 
+                : (project.config || {});
+              config.thumbnailUrl = project.thumbnail_url;
+              // Keep config as object if it was already an object, or stringify if it was a string
+              project.config = typeof project.config === 'string' ? JSON.stringify(config) : config;
+            } catch (error: any) {
+              fastify.log.warn({ projectId: project.id, error: error.message }, 'Failed to convert thumbnail_url to presigned URL');
+            }
+          }
+          
+          // Convert music_url column to presigned URL if it exists (column may not exist)
+          // Only process if the column exists in the result
+          if (project.music_url !== undefined && project.music_url !== null) {
+            try {
+              project.music_url = await convertS3UrlToPresigned(project.music_url, 3600);
+              // Also add to config for backward compatibility
+              if (!project.config) {
+                project.config = {};
+              }
+              const config = typeof project.config === 'string' 
+                ? JSON.parse(project.config) 
+                : (project.config || {});
+              config.musicUrl = project.music_url;
+              // Keep config as object if it was already an object, or stringify if it was a string
+              project.config = typeof project.config === 'string' ? JSON.stringify(config) : config;
+            } catch (error: any) {
+              fastify.log.warn({ projectId: project.id, error: error.message }, 'Failed to convert music_url to presigned URL');
+            }
+          }
+          
           if (project.config) {
             const config = typeof project.config === 'string' 
               ? JSON.parse(project.config) 
               : (project.config || {});
             
-            // Convert videoUrl to presigned URL if it exists
-            if (config.videoUrl) {
+            // Convert videoUrl to presigned URL if it exists (fallback if no final_video_url)
+            if (config.videoUrl && !project.final_video_url) {
               config.videoUrl = await convertS3UrlToPresigned(config.videoUrl, 3600);
             }
             
-            // Convert finalVideoUrl to presigned URL if it exists (preferred over videoUrl)
-            if (config.finalVideoUrl) {
+            // Convert finalVideoUrl to presigned URL if it exists (fallback if no final_video_url column)
+            if (config.finalVideoUrl && !project.final_video_url) {
               config.finalVideoUrl = await convertS3UrlToPresigned(config.finalVideoUrl, 3600);
+            }
+            
+            // Convert thumbnailUrl to presigned URL if it exists (fallback if no thumbnail_url column)
+            if (config.thumbnailUrl && !project.thumbnail_url) {
+              const originalConfigUrl = config.thumbnailUrl;
+              const convertedConfigUrl = await convertS3UrlToPresigned(config.thumbnailUrl, 3600);
+              config.thumbnailUrl = convertedConfigUrl || originalConfigUrl;
             }
             
             // Convert audioUrl to presigned URL if it exists
@@ -3301,10 +3465,35 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
               config.audioUrl = await convertS3UrlToPresigned(config.audioUrl, 3600);
             }
             
-            // Convert sceneUrls array to presigned URLs if it exists
+            // Convert sceneUrls array to presigned URLs if it exists (logging removed)
             if (config.sceneUrls && Array.isArray(config.sceneUrls)) {
               config.sceneUrls = await Promise.all(
-                config.sceneUrls.map((url: string) => convertS3UrlToPresigned(url, 3600))
+                config.sceneUrls.map(async (url: string, index: number) => {
+                  try {
+                    if (!url || typeof url !== 'string' || url.trim() === '') {
+                      return url;
+                    }
+                    const originalUrl = url.trim();
+                    
+                    // Check if already presigned
+                    const alreadyPresigned = originalUrl.includes('X-Amz-Signature') || originalUrl.includes('AWSAccessKeyId') || originalUrl.includes('?X-Amz-');
+                    if (alreadyPresigned) {
+                      return originalUrl;
+                    }
+                    
+                    const presignedUrl = await convertS3UrlToPresigned(originalUrl, 3600);
+                    return presignedUrl || originalUrl;
+                  } catch (error: any) {
+                    // Only log errors
+                    fastify.log.error({ 
+                      projectId: project.id, 
+                      error: error?.message,
+                      url: url?.substring(0, 100),
+                      index 
+                    }, 'Failed to convert sceneUrl to presigned URL');
+                    return url; // Return original URL on error
+                  }
+                })
               );
             }
             
@@ -3325,11 +3514,24 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             
             project.config = config;
           }
+          
+          // Removed verbose per-project logging
+          
           return project;
         })
       );
 
-      fastify.log.info({ projectCount: projectsWithPresignedUrls.length }, 'Projects fetched successfully');
+      // Log summary before returning
+      const projectsWithVideos = projectsWithPresignedUrls.filter((p: any) => 
+        p.final_video_url || p.config?.finalVideoUrl || p.config?.videoUrl
+      );
+      const projectsWithSceneUrls = projectsWithPresignedUrls.filter((p: any) => 
+        p.config?.sceneUrls && Array.isArray(p.config.sceneUrls) && p.config.sceneUrls.length > 0
+      );
+      fastify.log.info({ 
+        projectCount: projectsWithPresignedUrls.length
+      }, 'Projects processed');
+      
       return projectsWithPresignedUrls;
     } catch (error: any) {
       fastify.log.error({ err: error, message: error?.message, stack: error?.stack }, 'Error fetching projects');
@@ -3382,7 +3584,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       return reply.code(404).send({ error: 'Project not found' });
     }
 
-    // Convert S3 URLs in config to presigned URLs for secure access
+    // Convert S3 URLs in config and database columns to presigned URLs for secure access
     // Initialize config if it's null or undefined
     let config: any = {};
     if (project.config) {
@@ -3398,17 +3600,36 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       fastify.log.warn({ projectId: id, status: project.status }, 'Project config is null or undefined');
     }
     
-    // Convert videoUrl to presigned URL if it exists
+    // Convert final_video_url column to presigned URL if it exists (preferred source)
+    if (project.final_video_url !== null && project.final_video_url !== undefined && project.final_video_url !== '') {
+      try {
+        // Silent conversion - only log errors
+        project.final_video_url = await convertS3UrlToPresigned(project.final_video_url, 3600);
+        
+        // Also add to config for backward compatibility
+        config.finalVideoUrl = project.final_video_url;
+        config.videoUrl = project.final_video_url; // Also set as videoUrl for compatibility
+      } catch (error: any) {
+        fastify.log.warn({ projectId: id, error: error?.message }, 'Failed to convert final_video_url column to presigned URL');
+      }
+    }
+    
+    // Convert music_url column to presigned URL if it exists
+    if (project.music_url !== undefined && project.music_url !== null && project.music_url !== '') {
+      try {
+        project.music_url = await convertS3UrlToPresigned(project.music_url, 3600);
+        config.musicUrl = project.music_url; // Also add to config for backward compatibility
+      } catch (error: any) {
+        fastify.log.warn({ projectId: id, error: error?.message }, 'Failed to convert music_url column to presigned URL');
+      }
+    }
+    
+    // Convert videoUrl to presigned URL if it exists (fallback if no final_video_url column)
     try {
       if (config.videoUrl) {
         const originalUrl = config.videoUrl;
         config.videoUrl = await convertS3UrlToPresigned(config.videoUrl, 3600);
-        fastify.log.info({ 
-          projectId: id, 
-          originalUrl: originalUrl.substring(0, 150),
-          presignedUrl: config.videoUrl ? config.videoUrl.substring(0, 150) : null,
-          urlConverted: !!config.videoUrl
-        }, 'VideoUrl converted to presigned URL');
+        // Silent conversion - only log errors
       }
     } catch (error: any) {
       fastify.log.warn({ projectId: id, error: error?.message, url: config.videoUrl }, 'Failed to convert videoUrl to presigned URL');
@@ -3419,12 +3640,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       if (config.finalVideoUrl) {
         const originalUrl = config.finalVideoUrl;
         config.finalVideoUrl = await convertS3UrlToPresigned(config.finalVideoUrl, 3600);
-        fastify.log.info({ 
-          projectId: id, 
-          originalUrl: originalUrl.substring(0, 150),
-          presignedUrl: config.finalVideoUrl ? config.finalVideoUrl.substring(0, 150) : null,
-          urlConverted: !!config.finalVideoUrl
-        }, 'FinalVideoUrl converted to presigned URL');
+        // Silent conversion - only log errors
       }
     } catch (error: any) {
       fastify.log.warn({ projectId: id, error: error?.message, url: config.finalVideoUrl }, 'Failed to convert finalVideoUrl to presigned URL');
@@ -3439,22 +3655,33 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       fastify.log.warn({ projectId: id, error: error?.message, url: config.audioUrl }, 'Failed to convert audioUrl to presigned URL');
     }
     
-    // Convert sceneUrls array to presigned URLs if it exists
+    // Convert sceneUrls array to presigned URLs if it exists (logging removed)
     try {
       if (config.sceneUrls && Array.isArray(config.sceneUrls)) {
         config.sceneUrls = await Promise.all(
-          config.sceneUrls.map(async (url: string) => {
+          config.sceneUrls.map(async (url: string, index: number) => {
             try {
-              return await convertS3UrlToPresigned(url, 3600);
+              if (!url || typeof url !== 'string' || url.trim() === '') {
+                return url;
+              }
+              const originalUrl = url.trim();
+              const presignedUrl = await convertS3UrlToPresigned(originalUrl, 3600);
+              return presignedUrl || originalUrl;
             } catch (error: any) {
-              fastify.log.warn({ projectId: id, error: error?.message, url }, 'Failed to convert sceneUrl to presigned URL');
+              // Only log errors
+              fastify.log.error({ 
+                projectId: id, 
+                error: error?.message,
+                url: url?.substring(0, 100),
+                index 
+              }, 'Failed to convert sceneUrl to presigned URL');
               return url; // Return original URL on error
             }
           })
         );
       }
     } catch (error: any) {
-      fastify.log.warn({ projectId: id, error: error?.message }, 'Failed to convert sceneUrls to presigned URLs');
+      fastify.log.error({ projectId: id, error: error?.message }, 'Failed to convert sceneUrls to presigned URLs');
     }
     
     // Convert audioTracks URLs to presigned URLs if they exist
@@ -3483,26 +3710,15 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
     
     // Always set config, even if it was null/undefined
     // Create a new object to ensure config is always present
+    // Explicitly include name field and final_video_url to ensure they're always in the response
     const response = {
       ...project,
+      name: project.name || null, // Explicitly include name field
+      final_video_url: project.final_video_url || null, // Include final_video_url column if it exists
+      music_url: project.music_url || null, // Include music_url column if it exists
       config: config, // Always include config, even if empty object
     };
 
-    fastify.log.info({ 
-      projectId: id, 
-      hasConfig: !!response.config, 
-      hasVideoUrl: !!config.videoUrl,
-      hasFinalVideoUrl: !!config.finalVideoUrl,
-      videoUrl: config.videoUrl || null,
-      finalVideoUrl: config.finalVideoUrl || null,
-      videoUrlPreview: config.videoUrl ? config.videoUrl.substring(0, 100) + '...' : null,
-      finalVideoUrlPreview: config.finalVideoUrl ? config.finalVideoUrl.substring(0, 100) + '...' : null,
-      hasSceneUrls: !!config.sceneUrls && Array.isArray(config.sceneUrls) && config.sceneUrls.length > 0,
-      sceneUrlCount: config.sceneUrls && Array.isArray(config.sceneUrls) ? config.sceneUrls.length : 0,
-      configKeys: Object.keys(config),
-      configType: typeof response.config,
-      status: project.status 
-    }, 'Project fetched - VIDEO URLS IN RESPONSE');
 
     // Ensure config is included in response
     return response;
@@ -3715,7 +3931,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         sceneNumber: s.scene_number,
         prompt: s.prompt?.substring(0, 100),
         hasVideoUrl: !!s.video_url,
-        videoUrl: s.video_url ? s.video_url.substring(0, 150) + '...' : null,
+        videoUrl: s.video_url || null,
         hasFirstFrame: !!s.first_frame_url,
         hasLastFrame: !!s.last_frame_url,
         createdAt: s.created_at,
@@ -3744,9 +3960,9 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
     const user = getCognitoUser(request);
     const { id } = request.params as { id: string };
 
-    // Verify project belongs to user
+    // Verify project belongs to user and get config in one query
     const project = await queryOne(
-      'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
+      'SELECT id, config FROM projects WHERE id = $1 AND user_id = $2',
       [id, user.sub]
     );
 
@@ -3754,7 +3970,12 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       return reply.code(404).send({ error: 'Project not found' });
     }
 
-    // Get all scenes
+    // Parse project config to merge prompts from config
+    const projectConfig = project.config 
+      ? (typeof project.config === 'string' ? JSON.parse(project.config) : project.config)
+      : {};
+
+    // Get all scenes from database (URLs come from PostgreSQL)
     const scenes = await query(
       `SELECT id, scene_number, prompt, duration, start_time, video_url, thumbnail_url, first_frame_url, last_frame_url, created_at, updated_at
        FROM scenes
@@ -3764,6 +3985,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
     );
 
     // Convert S3 URLs to presigned URLs and map to frontend format
+    // Merge prompts from config if available (text comes from config)
     const scenesWithPresignedUrls = await Promise.all(
       scenes.map(async (s: any) => {
         let videoUrl = s.video_url;
@@ -3771,49 +3993,91 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         let lastFrameUrl = s.last_frame_url;
 
         // Convert to presigned URLs if they're S3 URLs
+        // Ensure URLs are complete and not truncated
         try {
           if (videoUrl && (videoUrl.includes('s3.') || videoUrl.includes('amazonaws.com'))) {
+            const originalVideoUrl = videoUrl;
             videoUrl = await convertS3UrlToPresigned(videoUrl, 3600);
+            if (!videoUrl || videoUrl.length < originalVideoUrl.length) {
+              fastify.log.warn({ 
+                projectId: id, 
+                sceneNumber: s.scene_number,
+                originalLength: originalVideoUrl.length,
+                convertedLength: videoUrl?.length || 0,
+                originalUrl: originalVideoUrl,
+              }, 'Video URL may have been truncated during conversion');
+              videoUrl = originalVideoUrl; // Fallback to original
+            }
           }
           if (firstFrameUrl && (firstFrameUrl.includes('s3.') || firstFrameUrl.includes('amazonaws.com'))) {
+            const originalFirstFrameUrl = firstFrameUrl;
             firstFrameUrl = await convertS3UrlToPresigned(firstFrameUrl, 3600);
+            if (!firstFrameUrl || firstFrameUrl.length < originalFirstFrameUrl.length) {
+              fastify.log.warn({ 
+                projectId: id, 
+                sceneNumber: s.scene_number,
+                originalLength: originalFirstFrameUrl.length,
+                convertedLength: firstFrameUrl?.length || 0,
+              }, 'First frame URL may have been truncated during conversion');
+              firstFrameUrl = originalFirstFrameUrl; // Fallback to original
+            }
           }
           if (lastFrameUrl && (lastFrameUrl.includes('s3.') || lastFrameUrl.includes('amazonaws.com'))) {
+            const originalLastFrameUrl = lastFrameUrl;
             lastFrameUrl = await convertS3UrlToPresigned(lastFrameUrl, 3600);
+            if (!lastFrameUrl || lastFrameUrl.length < originalLastFrameUrl.length) {
+              fastify.log.warn({ 
+                projectId: id, 
+                sceneNumber: s.scene_number,
+                originalLength: originalLastFrameUrl.length,
+                convertedLength: lastFrameUrl?.length || 0,
+              }, 'Last frame URL may have been truncated during conversion');
+              lastFrameUrl = originalLastFrameUrl; // Fallback to original
+            }
           }
         } catch (error: any) {
           fastify.log.warn({ 
             projectId: id, 
             sceneNumber: s.scene_number,
-            error: error?.message 
+            error: error?.message,
+            videoUrlLength: videoUrl?.length || 0,
+            firstFrameUrlLength: firstFrameUrl?.length || 0,
+            lastFrameUrlLength: lastFrameUrl?.length || 0,
           }, 'Failed to convert scene URL to presigned URL');
+        }
+
+        // Get prompt from config if available (prefer config over database prompt)
+        // Check config.scenePrompts first, then config.script.scenes
+        let prompt = s.prompt; // Default to database prompt
+        if (projectConfig.scenePrompts && Array.isArray(projectConfig.scenePrompts)) {
+          const configScene = projectConfig.scenePrompts.find((sp: any) => 
+            sp.id === s.id || projectConfig.scenePrompts.indexOf(sp) === s.scene_number - 1
+          );
+          if (configScene?.prompt) {
+            prompt = configScene.prompt;
+          }
+        } else if (projectConfig.script?.scenes && Array.isArray(projectConfig.script.scenes)) {
+          const configScene = projectConfig.script.scenes[s.scene_number - 1];
+          if (configScene?.prompt) {
+            prompt = configScene.prompt;
+          }
         }
 
         return {
           id: s.id,
           sceneNumber: s.scene_number,
-          prompt: s.prompt,
+          prompt: prompt, // Use prompt from config if available, otherwise from database
           duration: s.duration,
           startTime: s.start_time,
-          videoUrl: videoUrl,
+          videoUrl: videoUrl, // Always from database (PostgreSQL)
           thumbnailUrl: s.thumbnail_url,
-          firstFrameUrl: firstFrameUrl,
-          lastFrameUrl: lastFrameUrl,
+          firstFrameUrl: firstFrameUrl, // Always from database
+          lastFrameUrl: lastFrameUrl, // Always from database
           createdAt: s.created_at,
           updatedAt: s.updated_at,
         };
       })
     );
-
-    fastify.log.info({
-      projectId: id,
-      sceneCount: scenesWithPresignedUrls.length,
-      scenes: scenesWithPresignedUrls.map((s: any) => ({
-        sceneNumber: s.sceneNumber,
-        hasVideoUrl: !!s.videoUrl,
-        videoUrl: s.videoUrl ? s.videoUrl.substring(0, 100) + '...' : null,
-      })),
-    }, 'Scenes fetched for project with presigned URLs');
 
     return reply.send(scenesWithPresignedUrls);
   });
@@ -4184,21 +4448,57 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         `music-${Date.now()}.mp3`
       );
 
-      // Save music URL to project config
+      // Save music URL to project config and database column
+      // This ensures the URL is stored in both places for consistency and easier querying
       const currentConfig = typeof project.config === 'string' 
         ? JSON.parse(project.config) 
         : (project.config || {});
       currentConfig.musicUrl = uploadResult.url;
 
-      await query(
-        'UPDATE projects SET config = $1, updated_at = NOW() WHERE id = $2',
-        [JSON.stringify(currentConfig), projectId]
-      );
+      // Update both music_url column and config JSONB field
+      // The music_url column is indexed for faster queries, while config maintains backward compatibility
+      try {
+        await query(
+          `UPDATE projects 
+           SET music_url = $1, 
+               config = $2, 
+               updated_at = NOW() 
+           WHERE id = $3`,
+          [uploadResult.url, JSON.stringify(currentConfig), projectId]
+        );
+        fastify.log.info({ 
+          projectId, 
+          musicUrl: uploadResult.url.substring(0, 100) + '...',
+          savedTo: ['music_url_column', 'config_jsonb']
+        }, 'Music URL saved to both music_url column and config JSONB');
+      } catch (dbError: any) {
+        // If music_url column doesn't exist (legacy databases), just update config
+        if (dbError.message && dbError.message.includes('music_url')) {
+          fastify.log.warn({ projectId, error: dbError.message }, 'music_url column does not exist, updating config only');
+          await query(
+            `UPDATE projects 
+             SET config = $1, 
+                 updated_at = NOW() 
+             WHERE id = $2`,
+            [JSON.stringify(currentConfig), projectId]
+          );
+          fastify.log.info({ 
+            projectId, 
+            musicUrl: uploadResult.url.substring(0, 100) + '...',
+            savedTo: ['config_jsonb']
+          }, 'Music URL saved to config JSONB (music_url column not available)');
+        } else {
+          fastify.log.error({ projectId, error: dbError.message }, 'Failed to save music URL to database');
+          throw dbError;
+        }
+      }
 
       fastify.log.info({ 
         projectId, 
-        musicUrl: uploadResult.url.substring(0, 100) + '...' 
-      }, 'Music generated and saved successfully');
+        musicUrl: uploadResult.url.substring(0, 100) + '...',
+        s3Key: uploadResult.key,
+        s3Bucket: uploadResult.bucket
+      }, 'Music generated, uploaded to S3, and saved to database successfully');
 
       return reply.send({ musicUrl: uploadResult.url });
     } catch (error: any) {
@@ -4333,7 +4633,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
 
       // Add music if available
       if (musicUrl) {
-        fastify.log.info({ projectId, musicUrl: musicUrl.substring(0, 100) + '...' }, 'Adding music to stitched video');
+        fastify.log.info({ projectId, musicUrl: musicUrl }, 'Adding music to stitched video');
         await addAudioToVideo(concatVideoPath, musicUrl, finalVideoPath);
         fastify.log.info({ projectId }, 'Music added to video successfully');
       } else {
@@ -4355,42 +4655,57 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       // Cleanup temp directory
       await fs.rm(tempDir, { recursive: true, force: true });
 
-      // Update project config and database
+      // Update project config and database, and mark project as completed
       currentConfig.finalVideoUrl = finalVideoUrl;
       currentConfig.videoUrl = finalVideoUrl; // Also save as videoUrl for compatibility
 
-      // Try to update final_video_url column if it exists, otherwise just update config
+      // Try to update final_video_url column and mark as completed
       try {
         await query(
           `UPDATE projects 
            SET final_video_url = $1, 
+               status = 'completed',
                config = $2, 
                updated_at = NOW() 
            WHERE id = $3`,
           [finalVideoUrl, JSON.stringify(currentConfig), projectId]
         );
       } catch (dbError: any) {
-        // If final_video_url column doesn't exist, just update config
+        // If final_video_url column doesn't exist, just update config and status
         if (dbError.message && dbError.message.includes('final_video_url')) {
-          fastify.log.warn({ projectId, error: dbError.message }, 'final_video_url column does not exist, updating config only');
+          fastify.log.warn({ projectId, error: dbError.message }, 'final_video_url column does not exist, updating config and status only');
           await query(
             `UPDATE projects 
-             SET config = $1, 
+             SET status = 'completed',
+                 config = $1, 
                  updated_at = NOW() 
              WHERE id = $2`,
             [JSON.stringify(currentConfig), projectId]
           );
         } else {
           fastify.log.error({ projectId, error: dbError.message }, 'Failed to save final video URL to database');
+          // Try to mark as completed anyway
+          try {
+            await query(
+              `UPDATE projects 
+               SET status = 'completed',
+                   updated_at = NOW() 
+               WHERE id = $1`,
+              [projectId]
+            );
+          } catch (statusError: any) {
+            fastify.log.error({ projectId, error: statusError.message }, 'Failed to mark project as completed');
+          }
           throw dbError;
         }
       }
 
       fastify.log.info({ 
         projectId, 
-        finalVideoUrl: finalVideoUrl.substring(0, 100) + '...',
-        hasMusic: !!musicUrl
-      }, 'Scenes stitched successfully with music');
+        finalVideoUrl: finalVideoUrl,
+        hasMusic: !!musicUrl,
+        status: 'completed'
+      }, 'Final video stitched, uploaded to S3, saved to database, and project marked as completed');
 
       return reply.send({ 
         success: true,
@@ -4407,4 +4722,129 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       });
     }
   });
+
+  // Fix projects that have final_video_url but are not marked as completed
+  fastify.post('/projects/fix-completed-status', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Fix projects that have final_video_url but status is not completed',
+      tags: ['projects'],
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean' },
+            updatedCount: { type: 'number' },
+            totalWithVideos: { type: 'number' },
+            message: { type: 'string' },
+          },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    try {
+      const { query } = await import('../services/database');
+      
+      // Check if final_video_url column exists
+      const columnCheck = await query(
+        `SELECT EXISTS (
+          SELECT 1 
+          FROM information_schema.columns 
+          WHERE table_name = 'projects' 
+          AND column_name = 'final_video_url'
+        ) as exists`
+      );
+      const hasFinalVideoUrlColumn = columnCheck[0]?.exists || false;
+      
+      let updatedCount = 0;
+      let totalWithVideos = 0;
+      
+      if (hasFinalVideoUrlColumn) {
+        // Count projects with final_video_url but not completed
+        const countResult = await query(
+          `SELECT COUNT(*) as count
+           FROM projects
+           WHERE (
+             final_video_url IS NOT NULL 
+             AND final_video_url != ''
+             AND final_video_url != 'null'
+           )
+           AND status != 'completed'`
+        );
+        totalWithVideos = parseInt(countResult[0]?.count || '0', 10);
+        
+        // Update status to completed for projects with final_video_url
+        const updateResult = await query(
+          `UPDATE projects
+           SET status = 'completed',
+               updated_at = NOW()
+           WHERE (
+             final_video_url IS NOT NULL 
+             AND final_video_url != ''
+             AND final_video_url != 'null'
+           )
+           AND status != 'completed'
+           RETURNING id`
+        );
+        updatedCount = updateResult.length;
+      } else {
+        // Fallback: Check config for finalVideoUrl
+        const countResult = await query(
+          `SELECT COUNT(*) as count
+           FROM projects
+           WHERE (
+             (config->>'finalVideoUrl' IS NOT NULL 
+             AND config->>'finalVideoUrl' != ''
+             AND config->>'finalVideoUrl' != 'null')
+             OR 
+             (config->>'videoUrl' IS NOT NULL 
+             AND config->>'videoUrl' != ''
+             AND config->>'videoUrl' != 'null')
+           )
+           AND status != 'completed'`
+        );
+        totalWithVideos = parseInt(countResult[0]?.count || '0', 10);
+        
+        // Update status to completed for projects with video URLs in config
+        const updateResult = await query(
+          `UPDATE projects
+           SET status = 'completed',
+               updated_at = NOW()
+           WHERE (
+             (config->>'finalVideoUrl' IS NOT NULL 
+             AND config->>'finalVideoUrl' != ''
+             AND config->>'finalVideoUrl' != 'null')
+             OR 
+             (config->>'videoUrl' IS NOT NULL 
+             AND config->>'videoUrl' != ''
+             AND config->>'videoUrl' != 'null')
+           )
+           AND status != 'completed'
+           RETURNING id`
+        );
+        updatedCount = updateResult.length;
+      }
+      
+      fastify.log.info({ 
+        updatedCount, 
+        totalWithVideos,
+        hasFinalVideoUrlColumn 
+      }, 'Fixed projects with final_video_url but not marked as completed');
+      
+      return reply.send({
+        success: true,
+        updatedCount,
+        totalWithVideos,
+        hasFinalVideoUrlColumn,
+        message: `Updated ${updatedCount} project(s) to completed status`
+      });
+    } catch (error: any) {
+      fastify.log.error({ error: error.message, stack: error.stack }, 'Failed to fix completed status');
+      return reply.code(500).send({
+        error: 'Failed to fix completed status',
+        message: error.message
+      });
+    }
+  });
+
 }

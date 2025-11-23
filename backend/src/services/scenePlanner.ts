@@ -178,8 +178,11 @@ function generateScenePrompt(
   
   // Add continuity instructions for scenes after the first
   if (sceneNumber > 1) {
-    scenePrompt += `. Maintain visual continuity with previous scenes, same style and aesthetic.`;
+    scenePrompt += `. Maintain visual continuity with previous scenes: same theme, consistent camera style, matching color palette, and identical visual aesthetic. Ensure characters, objects, and environments maintain consistent appearance and style throughout.`;
   }
+  
+  // Add consistency instructions for all scenes
+  scenePrompt += `. Maintain consistent theme and camera style across all scenes. Use the same visual language, color grading, and cinematographic approach established in the opening scene.`;
   
   if (styleMood) {
     scenePrompt += `. ${styleMood}`;
@@ -187,6 +190,12 @@ function generateScenePrompt(
 
   // Add timing context
   scenePrompt += ` (${Math.round(startTime)}s - ${Math.round(endTime)}s)`;
+
+  // Ensure scene prompt is detailed enough (minimum 400 characters)
+  // If too short, expand with more visual details
+  if (scenePrompt.length < 400) {
+    scenePrompt += `. Include detailed visual elements: specific camera angles, precise lighting conditions, exact color tones, environmental textures, character positioning, and compositional details that ensure visual consistency with the overall theme.`;
+  }
 
   return scenePrompt;
 }

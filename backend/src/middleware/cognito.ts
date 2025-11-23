@@ -55,10 +55,6 @@ export async function verifyCognitoToken(
   try {
     const payload = await verifier.verify(token);
     
-    if (fastifyInstance) {
-      fastifyInstance.log.debug({ sub: payload.sub, email: payload.email }, 'Token verified successfully');
-    }
-    
     return {
       sub: payload.sub as string,
       email: payload.email as string | undefined,

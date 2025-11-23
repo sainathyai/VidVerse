@@ -112,31 +112,79 @@ export async function chatRoutes(fastify: FastifyInstance, options: FastifyPlugi
       // Check if user is requesting structured project generation (concept to full project)
       const isConceptGeneration = /(generate|create|build|make).*(full|complete|entire|whole|project|script|scenes|assets|music)/i.test(data.message) || 
                                    /(concept|idea|basic).*(elaborate|expand|generate|create|build)/i.test(data.message) ||
-                                   /(import|json|structured|format)/i.test(data.message);
+                                   /(import|json|structured|format)/i.test(data.message) ||
+                                   /(need|want|create).*(ad|video|commercial|promo).*(for|about)/i.test(data.message);
+
+      // Get project duration first to calculate scene count (needed for system prompt)
+      let projectDuration = 60; // Default
+      if (data.projectId) {
+        const { query } = await import('../services/database');
+        const projects = await query(
+          'SELECT * FROM projects WHERE id = $1 AND user_id = $2',
+          [data.projectId, user.sub]
+        );
+        if (projects.length > 0) {
+          const projectConfig = typeof projects[0].config === 'string' 
+            ? JSON.parse(projects[0].config) 
+            : (projects[0].config || {});
+          projectDuration = projectConfig.duration || 60;
+        }
+      } else if (data.projectContext) {
+        projectDuration = data.projectContext.duration || 60;
+      }
+
+      // Calculate scene count based on duration
+      let targetSceneCount = 5; // Default
+      if (projectDuration <= 30) {
+        targetSceneCount = 3;
+      } else if (projectDuration <= 60) {
+        targetSceneCount = 5;
+      } else {
+        targetSceneCount = 8;
+      }
 
       // Build system prompt with project context if available
+      // Use template literal with calculated values
       let systemPrompt = isConceptGeneration 
         ? `You are an expert AI video creation assistant specializing in generating complete, structured video projects from basic concepts. 
 
 When a user provides a basic concept (2-3 lines), you must generate a COMPLETE structured project in JSON format that includes:
 
-1. **Detailed Script**: A comprehensive, detailed script that elaborates on the concept with rich visual descriptions, camera movements, transitions, and narrative flow.
+1. **Detailed Script**: A comprehensive, detailed script that elaborates on the concept with rich visual descriptions, camera movements, transitions, and narrative flow. The script must establish a CONSISTENT THEME and CAMERA STYLE that will be maintained across all scenes.
 
 2. **Assets Array**: Extract all key visual assets mentioned in the script. Each asset should have:
-   - name: A descriptive name (e.g., "Vintage Tour Bus", "Desert Highway", "Band Member Portrait")
+   - name: A descriptive name (e.g., "Vintage Tour Bus", "Desert Highway", "Lead Character Portrait")
    - prompt: A detailed prompt for generating that asset as an image
+   - CRITICAL: Generate EXACTLY 3 to 5 assets (no more, no less). Prioritize the most important visual elements.
+   - IMPORTANT: When generating assets, prioritize LEAD CHARACTERS when applicable (e.g., main character portraits, key personas). For products like sunglasses, generate only ONE pair of glasses asset, not multiple variations. Focus on unique, distinct assets rather than duplicates.
 
 3. **Scenes Array**: Break the script into logical scenes. Each scene should have:
    - sceneNumber: Sequential number (1, 2, 3, etc.)
-   - prompt: Detailed scene description with visual specifications
+   - prompt: EXTENSIVE scene description with visual specifications (MINIMUM 400-600 characters per scene)
    - assetIds: Array of asset names/IDs that belong to this scene (matching asset names from assets array)
+   - CRITICAL SCENE PLANNING: Each scene must be MAXIMUM 8 seconds long. Calculate the number of scenes needed: ${projectDuration} seconds ÷ 8 seconds per scene = ${Math.ceil(projectDuration / 8)} scenes minimum. Generate ${targetSceneCount} scenes based on the project duration (${projectDuration} seconds). For short videos (≤30s), use 3-4 scenes. For medium videos (31-60s), use 5-8 scenes. For long videos (>60s), use 8-15 scenes. Each scene duration must be ≤ 8 seconds.
+   - CONSISTENCY REQUIREMENTS: All scenes must maintain:
+     * The same visual theme and aesthetic style
+     * Consistent camera style (e.g., if using "cinematic wide shots", maintain that style throughout)
+     * Consistent color palette and lighting approach
+     * Consistent character appearances (if characters are present)
+     * Smooth visual transitions between scenes
+   - SCENE PROMPT DETAILS: Each scene prompt must be 400-600+ characters and include:
+     * Detailed visual description of the scene
+     * Specific camera angle, movement, and framing
+     * Lighting conditions and mood
+     * Color palette and visual style
+     * Character positioning and actions (if applicable)
+     * Environmental details and setting
+     * Reference to maintaining consistency with previous scenes
 
 4. **Music Prompt**: Generate a JSON-formatted music prompt with:
-   - lyrics: Song lyrics or description (if applicable)
-   - prompt: Musical style description
+   - lyrics: Song lyrics or description (10-600 characters, if applicable)
+   - prompt: Musical style description ONLY (10-300 characters, keep it short and focused on style like "Jazz, Smooth Jazz, Romantic, Dreamy" or "Electronic, Upbeat, Energetic")
    - bitrate: "320" (default)
    - sample_rate: "44100" (default)
    - audio_format: "mp3" (default)
+   - CRITICAL: The prompt field must be 10-300 characters and contain ONLY the musical style/genre description. Do NOT include lyrics, descriptions, or explanations in the prompt field.
 
 CRITICAL FORMATTING REQUIREMENTS:
 - Your response must be in PLAIN TEXT format for user readability
@@ -155,26 +203,37 @@ CRITICAL FORMATTING REQUIREMENTS:
   "scenes": [
     {
       "sceneNumber": 1,
-      "prompt": "Detailed scene description with visual specifications...",
+      "prompt": "EXTENSIVE scene description (400-600+ characters) with visual specifications, camera style, lighting, and consistency notes...",
       "assetIds": ["Asset Name 1", "Asset Name 2"]
     },
     ...
   ],
   "music": {
-    "lyrics": "Song lyrics or description",
-    "prompt": "Musical style description",
+    "lyrics": "Song lyrics or description (10-600 characters)",
+    "prompt": "Musical style description ONLY (10-300 characters, e.g., 'Jazz, Smooth Jazz, Romantic, Dreamy')",
     "bitrate": "320",
     "sample_rate": "44100",
     "audio_format": "mp3"
   }
 }
 
-- Include as many details as possible in each scene prompt
+- Include EXTENSIVE details in each scene prompt (400-600+ characters minimum)
+- Establish and maintain consistent theme, camera style, and visual aesthetic across ALL scenes
 - Determine which assets belong to which scenes based on the script
 - Make the script comprehensive and cinematic
 - Ensure all prompts are detailed enough for AI video/image generation
 
-After generating the JSON, provide a brief summary in plain text explaining what was generated.`
+After generating the JSON, provide a brief summary in plain text explaining what was generated.
+
+IMPORTANT CONSTRAINTS:
+- Generate EXACTLY 3 to 5 assets (prioritize the most important visual elements, especially lead characters when applicable)
+- For products like sunglasses, generate only ONE pair, not multiple variations
+- Generate ${targetSceneCount} scenes based on the project duration (${projectDuration} seconds)
+- Each scene must be MAXIMUM 8 seconds long (plan accordingly: ${projectDuration}s ÷ 8s = ${Math.ceil(projectDuration / 8)} scenes minimum)
+- Each scene prompt must be 400-600+ characters with extensive visual details
+- ALL scenes must maintain consistent theme, camera style, color palette, and visual aesthetic
+- Map assets to scenes based on which assets appear in each scene
+- Music prompt field must be 10-300 characters and contain ONLY the musical style/genre (e.g., "Jazz, Smooth Jazz, Romantic, Dreamy" or "Electronic, Upbeat, Energetic"). Do NOT include lyrics, descriptions, or explanations in the prompt field. Keep it short and style-focused only.`
         : `You are an expert AI video creation assistant helping users craft exceptional video projects. Your role is to:
 
 1. **Context Awareness**: 
@@ -239,7 +298,7 @@ CRITICAL: Review the conversation history and project context before asking any 
 - Name: ${project.name || 'Untitled'}
 - Category: ${project.category}
 - Prompt: ${project.prompt}
-- Duration: ${projectConfig.duration || 60} seconds
+- Duration: ${projectDuration} seconds
 - Style: ${projectConfig.style || 'Not specified'}
 - Mood: ${projectConfig.mood || 'Not specified'}
 - Aspect Ratio: ${projectConfig.aspectRatio || 'Not specified'}
@@ -250,11 +309,12 @@ CRITICAL: Review the conversation history and project context before asking any 
       } else if (data.projectContext) {
         // Use provided project context (for new projects)
         const ctx = data.projectContext;
+        
         projectContextText = `\n\nCurrent Project Context:
 - Name: ${ctx.name || 'Untitled'}
 - Category: ${ctx.category || 'Not specified'}
 - Prompt: ${ctx.prompt || 'Not specified'}
-- Duration: ${ctx.duration || 60} seconds
+- Duration: ${projectDuration} seconds
 - Style: ${ctx.style || 'Not specified'}
 - Mood: ${ctx.mood || 'Not specified'}
 - Aspect Ratio: ${ctx.aspectRatio || 'Not specified'}

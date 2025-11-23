@@ -43,7 +43,7 @@ export async function extractFrames(
     }
 
     // Download video to local file first (more reliable than processing from URL)
-    console.log(`[VIDEO_PROCESSOR] Downloading video from ${videoUrl.substring(0, 100)}...`);
+    console.log(`[VIDEO_PROCESSOR] Downloading video from ${videoUrl}`);
     const videoResponse = await fetch(videoUrl);
     if (!videoResponse.ok) {
       throw new Error(`Failed to download video: ${videoResponse.status} ${videoResponse.statusText}`);
