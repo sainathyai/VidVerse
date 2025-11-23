@@ -13,3 +13,4 @@ CREATE INDEX IF NOT EXISTS idx_scenes_asset_id ON scenes(asset_id) WHERE asset_i
 COMMENT ON COLUMN scenes.asset_id IS 'Stores video ID (Sora) or GCS URI (Veo 3.1) for video extension. NULL for images.';
 
 
+

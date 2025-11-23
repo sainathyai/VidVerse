@@ -58,6 +58,7 @@ function SimpleCreateContent() {
   const [videoModelId, setVideoModelId] = useState('google/veo-3.1');
   const [imageModelId, setImageModelId] = useState('google/imagen-4-ultra');
   const [useReferenceFrame, setUseReferenceFrame] = useState(false);
+  const [includeAudio, setIncludeAudio] = useState(false); // Default to false - user opts in
   const [continuous, setContinuous] = useState(false);
   const [parallel, setParallel] = useState(false);
   const [isGeneratingAll, setIsGeneratingAll] = useState(false);
@@ -1419,6 +1420,7 @@ function SimpleCreateContent() {
               colorPalette,
               pacing,
               referenceImages: generatedAnchorImages.map(img => img.url), // Pass anchor images as reference_images
+              withAudio: includeAudio, // Include audio only if user opts in
             }),
           },
           token
@@ -2047,6 +2049,7 @@ function SimpleCreateContent() {
         previousSceneLastFrame: previousSceneLastFrame,
         useReferenceFrame: scene.extendPrevious && useReferenceFrame,
         continuous: continuous,
+        withAudio: includeAudio, // Include audio only if user opts in
       };
 
       // Call API to generate single scene
@@ -2082,7 +2085,7 @@ function SimpleCreateContent() {
         s.id === scene.id ? { ...s, isGenerating: false } : s
       ));
     }
-  }, [getAccessToken, ensureProjectExists, generatedAnchorImages, scenes, videoModelId, aspectRatio, style, mood, colorPalette, pacing, useReferenceFrame, continuous]);
+  }, [getAccessToken, ensureProjectExists, generatedAnchorImages, scenes, videoModelId, aspectRatio, style, mood, colorPalette, pacing, useReferenceFrame, continuous, includeAudio]);
 
   const handleAddScene = useCallback(() => {
                   setScenes(prev => [...prev, {
@@ -2162,6 +2165,7 @@ function SimpleCreateContent() {
                 acc[img.id] = img.url;
                 return acc;
               }, {} as Record<string, string>),
+            withAudio: includeAudio, // Include audio only if user opts in
           }),
         },
         token
@@ -2192,7 +2196,7 @@ function SimpleCreateContent() {
     } finally {
       setIsGeneratingAll(false);
     }
-  }, [scenes, parallel, continuous, useReferenceFrame, videoModelId, aspectRatio, style, mood, colorPalette, pacing, generatedAnchorImages, getAccessToken, ensureProjectExists]);
+  }, [scenes, parallel, continuous, useReferenceFrame, videoModelId, aspectRatio, style, mood, colorPalette, pacing, generatedAnchorImages, getAccessToken, ensureProjectExists, includeAudio]);
 
   const handleSceneVideoClick = useCallback((sceneId: string) => {
     setShowSceneModal({ sceneId, isOpen: true, currentIndex: 0 });
@@ -2530,6 +2534,8 @@ function SimpleCreateContent() {
           onImageModelIdChange={setImageModelId}
           useReferenceFrame={useReferenceFrame}
           onUseReferenceFrameChange={setUseReferenceFrame}
+          includeAudio={includeAudio}
+          onIncludeAudioChange={setIncludeAudio}
           styleOptions={styleOptions}
           moodOptions={moodOptions}
           aspectRatioOptions={aspectRatioOptions}

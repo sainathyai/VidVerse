@@ -4,12 +4,12 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskRole",
+  "executionRoleArn": "arn:aws:iam::971422717446:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::971422717446:role/EcsTaskRole",
   "containerDefinitions": [
     {
       "name": "frontend",
-      "image": "ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/vidverse-frontend:latest",
+      "image": "971422717446.dkr.ecr.us-west-2.amazonaws.com/vidverse-frontend:latest",
       "essential": true,
       "portMappings": [
         {
@@ -38,15 +38,15 @@
       "secrets": [
         {
           "name": "VITE_COGNITO_USER_POOL_ID",
-          "valueFrom": "arn:aws:secretsmanager:us-west-2:ACCOUNT_ID:secret:vidverse/cognito-user-pool-id"
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:971422717446:secret:vidverse/cognito-user-pool-id-dZtXpE"
         },
         {
           "name": "VITE_COGNITO_CLIENT_ID",
-          "valueFrom": "arn:aws:secretsmanager:us-west-2:ACCOUNT_ID:secret:vidverse/cognito-client-id"
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:971422717446:secret:vidverse/cognito-client-id-7FHinK"
         },
         {
           "name": "VITE_COGNITO_DOMAIN",
-          "valueFrom": "arn:aws:secretsmanager:us-west-2:ACCOUNT_ID:secret:vidverse/cognito-domain"
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:971422717446:secret:vidverse/cognito-domain-9p8n7p"
         }
       ],
       "logConfiguration": {

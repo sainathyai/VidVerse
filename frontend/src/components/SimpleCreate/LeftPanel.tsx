@@ -22,6 +22,8 @@ interface LeftPanelProps {
   onImageModelIdChange: (imageModelId: string) => void;
   useReferenceFrame: boolean;
   onUseReferenceFrameChange: (useReferenceFrame: boolean) => void;
+  includeAudio: boolean;
+  onIncludeAudioChange: (includeAudio: boolean) => void;
   styleOptions: Array<{ value: string; label: string }>;
   moodOptions: Array<{ value: string; label: string }>;
   aspectRatioOptions: Array<{ value: string; label: string; description?: string }>;
@@ -54,6 +56,8 @@ export function LeftPanel({
   onImageModelIdChange,
   useReferenceFrame,
   onUseReferenceFrameChange,
+  includeAudio,
+  onIncludeAudioChange,
   styleOptions,
   moodOptions,
   aspectRatioOptions,
@@ -321,8 +325,26 @@ export function LeftPanel({
           </div>
         </div>
 
-        {/* Use Reference Frame Checkbox */}
+        {/* Include Audio Checkbox */}
         <div className="animate-fade-in" style={{ animationDelay: '0.65s' }}>
+          <label className="flex items-center gap-2 cursor-pointer group">
+            <input
+              type="checkbox"
+              checked={includeAudio}
+              onChange={(e) => onIncludeAudioChange(e.target.checked)}
+              className="w-4 h-4 rounded border-white/20 bg-white/5 text-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:ring-offset-0 cursor-pointer"
+            />
+            <span className="text-sm text-white/70 group-hover:text-white transition-colors">
+              Include audio in generated videos
+            </span>
+          </label>
+          <p className="mt-1 ml-6 text-xs text-white/50">
+            Generate videos with AI-generated audio (unchecked = silent videos)
+          </p>
+        </div>
+
+        {/* Use Reference Frame Checkbox */}
+        <div className="animate-fade-in" style={{ animationDelay: '0.7s' }}>
           <label className="flex items-center gap-2 cursor-pointer group">
             <input
               type="checkbox"

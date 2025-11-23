@@ -610,10 +610,11 @@ Generate approximately ${finalTargetWords} words (${finalTargetLength} character
             type: 'object',
             additionalProperties: { type: 'string' },
           },
+          withAudio: { type: 'boolean' },
         },
       },
     },
-  }, async (request: FastifyRequest<{ Params: { id: string }; Body?: { useReferenceFrame?: boolean; continuous?: boolean; videoModelId?: string; aspectRatio?: string; style?: string; mood?: string; colorPalette?: string; pacing?: string; referenceImages?: string[] } }>, reply: FastifyReply) => {
+  }, async (request: FastifyRequest<{ Params: { id: string }; Body?: { useReferenceFrame?: boolean; continuous?: boolean; videoModelId?: string; aspectRatio?: string; style?: string; mood?: string; colorPalette?: string; pacing?: string; referenceImages?: string[]; withAudio?: boolean } }>, reply: FastifyReply) => {
     const user = getCognitoUser(request);
     const { id: projectId } = request.params;
     const requestBody = request.body || {};
@@ -654,6 +655,7 @@ Generate approximately ${finalTargetWords} words (${finalTargetLength} character
       ...(requestBody.colorPalette !== undefined && { colorPalette: requestBody.colorPalette }),
       ...(requestBody.pacing !== undefined && { pacing: requestBody.pacing }),
       ...(requestBody.referenceImages !== undefined && { referenceImages: requestBody.referenceImages }),
+      ...(requestBody.withAudio !== undefined && { withAudio: requestBody.withAudio }),
     };
 
     // Log config values for debugging
@@ -1275,6 +1277,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             mood: scriptParsedPrompt.mood || config.mood,
             colorPalette: scriptParsedPrompt.colorPalette || config.colorPalette,
             pacing: scriptParsedPrompt.pacing || config.pacing,
+            withAudio: requestBody.withAudio === true, // Default to false, only true if explicitly set
           };
           
           // Add reference_images array for Veo 3.1
@@ -1985,7 +1988,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         mood: requestBody.mood || config.mood,
         colorPalette: requestBody.colorPalette || config.colorPalette,
         pacing: requestBody.pacing || config.pacing,
-        withAudio: requestBody.withAudio !== false, // Default to true, allow override
+        withAudio: requestBody.withAudio === true, // Default to false, only true if explicitly set
       };
 
       // Add dimensions for non-Veo models
@@ -2253,6 +2256,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
           colorPalette: { type: 'string' },
           pacing: { type: 'string' },
           referenceImages: { type: 'array', items: { type: 'string' } },
+          withAudio: { type: 'boolean' },
         },
       },
     },
@@ -2271,6 +2275,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       pacing?: string;
           referenceImages?: string[];
           assetIdToUrlMap?: Record<string, string>;
+          withAudio?: boolean;
         } 
       }>, reply: FastifyReply) => {
     const user = getCognitoUser(request);
@@ -2331,7 +2336,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             mood: requestBody.mood || config.mood,
             colorPalette: requestBody.colorPalette || config.colorPalette,
             pacing: requestBody.pacing || config.pacing,
-            withAudio: true,
+            withAudio: requestBody.withAudio === true, // Default to false, only true if explicitly set
           };
 
           // IMPORTANT: Veo 3.1 doesn't support both 'video' (extendPrevious) and 'reference_images' together
@@ -2561,7 +2566,7 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             mood: requestBody.mood || config.mood,
             colorPalette: requestBody.colorPalette || config.colorPalette,
             pacing: requestBody.pacing || config.pacing,
-            withAudio: true,
+            withAudio: requestBody.withAudio === true, // Default to false, only true if explicitly set
           };
 
           // IMPORTANT: Veo 3.1 doesn't support both 'video' (extendPrevious) and 'reference_images' together

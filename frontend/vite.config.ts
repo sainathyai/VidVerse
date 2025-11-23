@@ -14,8 +14,14 @@ export default defineConfig({
   },
   server: {
     port: 3000,
-    host: 'localhost', // Restrict to localhost only
+    host: '0.0.0.0', // Bind to all interfaces
     strictPort: true,
+    hmr: {
+      clientPort: 3000, // Use the same port for HMR client
+    },
+    watch: {
+      usePolling: false,
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:3001',
