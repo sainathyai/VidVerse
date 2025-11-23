@@ -3559,15 +3559,19 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
           type: 'object',
           properties: {
             id: { type: 'string' },
+            name: { type: 'string' }, // Include name field in response schema
             category: { type: 'string' },
             prompt: { type: 'string' },
             status: { type: 'string' },
             created_at: { type: 'string' },
+            final_video_url: { type: ['string', 'null'] }, // Include final_video_url
+            music_url: { type: ['string', 'null'] }, // Include music_url
             config: { 
               type: 'object',
               additionalProperties: true,
             },
           },
+          additionalProperties: true, // Allow additional properties from database
         },
       },
     },

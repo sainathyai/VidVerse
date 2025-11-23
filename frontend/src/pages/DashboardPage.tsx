@@ -324,20 +324,30 @@ function DashboardContent() {
   }, [projects]);
 
   // Generate default project names for projects without names
+  // Keep the backend order (newest first) but generate display names based on chronological order
   const projectsWithNames = useMemo(() => {
-    return projects.map((project, index) => {
+    // Sort by creation date ascending to get correct numbering (oldest = Project 1)
+    const sortedByDate = [...projects].sort((a, b) => 
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+    
+    // Create a map of project ID to its chronological index
+    const projectIndexMap = new Map<string, number>();
+    sortedByDate.forEach((project, index) => {
+      projectIndexMap.set(project.id, index + 1);
+    });
+    
+    // Map projects back to original order (newest first from backend) with display names
+    return projects.map((project) => {
       if (!project.name || project.name.trim() === '') {
-        // Generate default name: "Project 1", "Project 2", etc.
-        // Sort by creation date to ensure consistent numbering
-        const sortedProjects = [...projects].sort((a, b) => 
-          new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-        );
-        const projectIndex = sortedProjects.findIndex(p => p.id === project.id);
+        // Generate default name: "Project 1", "Project 2", etc. based on chronological order
+        const projectIndex = projectIndexMap.get(project.id) || 1;
         return {
           ...project,
-          displayName: `Project ${projectIndex + 1}`,
+          displayName: `Project ${projectIndex}`,
         };
       }
+      // Use the actual saved name from database
       return {
         ...project,
         displayName: project.name,

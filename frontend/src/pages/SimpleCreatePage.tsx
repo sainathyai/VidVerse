@@ -478,6 +478,21 @@ function SimpleCreateContent() {
 
       const project = await apiRequest<any>(`/api/projects/${projectId}`, { method: 'GET' }, token);
       
+      // Log the entire project object to see what fields are available
+      console.log('[SimpleCreate] Project loaded from database:', {
+        projectId: project.id,
+        projectKeys: Object.keys(project),
+        fullProject: project, // Log entire object to see all fields
+        name: project.name,
+        Name: project.Name, // Check for capitalized version
+        projectName: project.projectName,
+        displayName: project.displayName,
+        // Check for lowercase PostgreSQL column names
+        name_lower: (project as any).name,
+        // Check if name is in a nested object
+        configName: project.config?.name
+      });
+      
       // Load final video URL from database (preferred) or config
       if (project.final_video_url) {
         setFinalVideoUrl(project.final_video_url);
@@ -490,11 +505,60 @@ function SimpleCreateContent() {
       }
       
       // Load project data into form
-      // Always set project name from database (don't let auto-generation overwrite it)
-      // Set it even if empty to prevent auto-generation from running
-      const loadedProjectName = project.name !== undefined && project.name !== null 
-        ? project.name.trim() 
+      // Use the actual saved name from database - only generate display name if empty or generic
+      // Check multiple possible name fields (case variations and nested locations)
+      // PostgreSQL returns column names in lowercase, so check both cases
+      let loadedProjectName = (
+        project.name || 
+        (project as any).Name || 
+        (project as any).NAME ||
+        project.projectName || 
+        project.displayName ||
+        project.config?.name ||
+        (project as any)['name'] // Check with bracket notation
+      );
+      loadedProjectName = loadedProjectName !== undefined && loadedProjectName !== null 
+        ? String(loadedProjectName).trim() 
         : '';
+      
+      console.log('[SimpleCreate] Loading project name from database:', {
+        projectId: project.id,
+        nameFromDB: project.name,
+        trimmedName: loadedProjectName,
+        isEmpty: !loadedProjectName,
+        matchesGenericPattern: loadedProjectName ? /^project\s+\d+$/i.test(loadedProjectName) : false
+      });
+      
+      // If project name is empty or matches generic pattern (like "project 1", "Project 1", etc.), 
+      // generate a display name consistent with dashboard
+      // But if it has a custom saved name, use that instead
+      if (!loadedProjectName || /^project\s+\d+$/i.test(loadedProjectName)) {
+        console.log('[SimpleCreate] Generating display name for project (empty or generic)');
+        try {
+          // Fetch all projects to determine the correct display name
+          const allProjects = await apiRequest<any[]>('/api/projects', { method: 'GET' }, token);
+          // Sort by creation date ascending to match dashboard logic (oldest = Project 1)
+          const sortedProjects = [...allProjects].sort((a, b) => 
+            new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+          );
+          const projectIndex = sortedProjects.findIndex(p => p.id === project.id);
+          if (projectIndex >= 0) {
+            loadedProjectName = `Project ${projectIndex + 1}`;
+            console.log('[SimpleCreate] Generated display name:', loadedProjectName);
+          } else {
+            // Fallback if project not found in list
+            loadedProjectName = loadedProjectName || 'Project';
+          }
+        } catch (error) {
+          console.error('Failed to fetch projects for display name:', error);
+          // Fallback to original name or default
+          loadedProjectName = loadedProjectName || 'Project';
+        }
+      } else {
+        console.log('[SimpleCreate] Using saved custom name:', loadedProjectName);
+      }
+      // If loadedProjectName has a custom name (not empty, not generic), use it as-is
+      // This preserves user-edited names
       
       setProjectName(loadedProjectName);
       if (project.prompt) setPrompt(project.prompt);
@@ -976,25 +1040,47 @@ function SimpleCreateContent() {
       nameToSave = autoName;
     }
     
+    console.log('[SimpleCreate] Saving project name:', {
+      projectId: currentProjectId,
+      nameToSave: nameToSave,
+      trimmed: trimmed
+    });
+    
     setProjectName(nameToSave);
     setIsEditingProjectName(false);
     
-    // Save to database if we have a project ID
-    if (currentProjectId) {
+    // Ensure project exists first, then save name
+    const projectId = currentProjectId || await ensureProjectExists();
+    
+    if (projectId) {
       try {
         const token = await getAccessToken();
         if (token) {
-          await apiRequest(`/api/projects/${currentProjectId}`, {
+          const response = await apiRequest(`/api/projects/${projectId}`, {
             method: 'PATCH',
             body: JSON.stringify({
               name: nameToSave,
             }),
           }, token);
+          console.log('[SimpleCreate] Project name saved successfully to database:', {
+            projectId: projectId,
+            savedName: nameToSave,
+            response: response
+          });
+          
+          // Update current project ID if it was just created
+          if (!currentProjectId && projectId) {
+            setCurrentProjectId(projectId);
+          }
+        } else {
+          console.warn('[SimpleCreate] Cannot save project name - no auth token');
         }
       } catch (error: any) {
-        console.error('Error saving project name:', error);
-        // Don't show alert - name is saved locally, just failed to sync to DB
+        console.error('[SimpleCreate] Error saving project name to database:', error);
+        alert(`Failed to save project name: ${error.message || 'Unknown error'}`);
       }
+    } else {
+      console.warn('[SimpleCreate] Cannot save project name - no project ID available');
     }
   };
 
