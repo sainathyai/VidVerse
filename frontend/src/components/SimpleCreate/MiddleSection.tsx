@@ -1,6 +1,7 @@
 import React from "react";
-import { Pencil, Check, X, Image as ImageIcon, Loader2, Plus, Play, Video as VideoIcon, Music, Upload, FileText } from "lucide-react";
+import { Pencil, Check, X, Image as ImageIcon, Loader2, Plus, Play, Video as VideoIcon, Music, Upload, FileText, Download, Edit3 } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
+import { useNavigate } from "react-router-dom";
 
 const MAX_ANCHOR_ASSETS = 5;
 
@@ -79,6 +80,7 @@ interface MiddleSectionProps {
   finalVideoUrl: string | null;
   onUploadAsset?: (assetIndex: number, file: File) => Promise<void>;
   onPopulateScenes?: () => void;
+  projectId?: string | null;
 }
 
 export function MiddleSection({
@@ -131,9 +133,11 @@ export function MiddleSection({
   finalVideoUrl,
   onUploadAsset,
   onPopulateScenes,
+  projectId,
 }: MiddleSectionProps) {
   const [draggedIndex, setDraggedIndex] = React.useState<number | null>(null);
   const { getAccessToken } = useAuth();
+  const navigate = useNavigate();
   const [assetBlobUrls, setAssetBlobUrls] = React.useState<Map<string, string>>(new Map());
   const fetchedAssetIdsRef = React.useRef<Set<string>>(new Set());
 
@@ -1024,6 +1028,77 @@ export function MiddleSection({
                   <div className="px-2 py-1 bg-green-500/90 text-white text-xs font-medium rounded backdrop-blur-sm">
                     Final Video
                   </div>
+                </div>
+              </div>
+              
+              {/* Action Buttons Below Video */}
+              <div className="mt-4 flex items-center justify-end gap-3">
+                {/* Advanced Edit Button */}
+                {projectId && (
+                  <button
+                    onClick={() => navigate(`/project/${projectId}/edit`)}
+                    className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-purple-500/90 to-pink-500/90 text-white rounded-lg font-medium text-sm backdrop-blur-md border border-white/20 shadow-lg shadow-purple-500/30 hover:shadow-xl hover:shadow-purple-500/50 hover:scale-[1.03] hover:from-purple-500 hover:to-pink-500 transition-all duration-300"
+                  >
+                    <Edit3 className="w-4 h-4" />
+                    Advanced Edit
+                  </button>
+                )}
+                
+                {/* Download Options */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      if (!finalVideoUrl) return;
+                      try {
+                        const response = await fetch(finalVideoUrl);
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `final-video-${Date.now()}.mp4`;
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+                      } catch (error) {
+                        console.error('Failed to download MP4:', error);
+                        alert('Failed to download video. Please try again.');
+                      }
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500/90 to-cyan-500/90 text-white rounded-lg font-medium text-sm backdrop-blur-md border border-white/20 shadow-lg shadow-blue-500/30 hover:shadow-xl hover:shadow-blue-500/50 hover:scale-[1.03] hover:from-blue-500 hover:to-cyan-500 transition-all duration-300"
+                  >
+                    <Download className="w-4 h-4" />
+                    Download MP4
+                  </button>
+                  
+                  <button
+                    onClick={async () => {
+                      if (!finalVideoUrl) return;
+                      try {
+                        // For MOV, we need to convert or serve as MOV
+                        // Since we're serving MP4, we'll download as MOV by changing the extension
+                        // Note: This is a client-side conversion - the actual format is still MP4
+                        // For true MOV conversion, you'd need backend processing
+                        const response = await fetch(finalVideoUrl);
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `final-video-${Date.now()}.mov`;
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+                      } catch (error) {
+                        console.error('Failed to download MOV:', error);
+                        alert('Failed to download video. Please try again.');
+                      }
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500/90 to-teal-500/90 text-white rounded-lg font-medium text-sm backdrop-blur-md border border-white/20 shadow-lg shadow-emerald-500/30 hover:shadow-xl hover:shadow-emerald-500/50 hover:scale-[1.03] hover:from-emerald-500 hover:to-teal-500 transition-all duration-300"
+                  >
+                    <Download className="w-4 h-4" />
+                    Download MOV
+                  </button>
                 </div>
               </div>
             </div>

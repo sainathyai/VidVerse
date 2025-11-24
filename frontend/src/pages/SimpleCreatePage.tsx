@@ -3111,6 +3111,7 @@ function SimpleCreateContent() {
           finalVideoUrl={finalVideoUrl}
           onUploadAsset={handleUploadAsset}
           onPopulateScenes={handlePopulateScenes}
+          projectId={currentProjectId}
         />
 
         {/* Right Panel - Reserved for future features */}
