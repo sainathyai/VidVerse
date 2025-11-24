@@ -165,11 +165,18 @@ export async function assetRoutes(fastify: FastifyInstance, options: FastifyPlug
     }
 
     // Get all assets for the project
+    // Order by assetNumber from metadata (if available), then by created_at as fallback
     const assets = await query(
       `SELECT id, type, url, filename, metadata, created_at
        FROM assets
        WHERE project_id = $1
-       ORDER BY created_at ASC`,
+       ORDER BY 
+         CASE 
+           WHEN metadata->>'assetNumber' IS NOT NULL 
+           THEN (metadata->>'assetNumber')::integer 
+           ELSE 999999 
+         END ASC,
+         created_at ASC`,
       [projectId]
     );
 

@@ -2570,7 +2570,8 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
           };
 
           // IMPORTANT: Veo 3.1 doesn't support both 'video' (extendPrevious) and 'reference_images' together
-          // Check if this scene wants to extend previous video
+          // CRITICAL: First scene (i === 0) always prioritizes assets and never uses extendPrevious
+          // Check if this scene wants to extend previous video (only for scenes after the first)
           if (sceneData.extendPrevious && i > 0) {
             // Get previous scene's video URL from already generated scenes
             const previousSceneResult = sceneResults[i - 1];
@@ -2599,8 +2600,9 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             }
           } else {
             // Only add reference_images if extendPrevious is NOT true
+            // First scene (i === 0) always uses reference_images (assets) - prioritize assets
             // Filter reference images based on this scene's selectedAssetIds
-            if (!sceneData.extendPrevious && sceneData.selectedAssetIds && sceneData.selectedAssetIds.length > 0 && requestBody.assetIdToUrlMap) {
+            if ((i === 0 || !sceneData.extendPrevious) && sceneData.selectedAssetIds && sceneData.selectedAssetIds.length > 0 && requestBody.assetIdToUrlMap) {
               // Map selected asset IDs to URLs for this specific scene
               const sceneReferenceImages = sceneData.selectedAssetIds
                 .map(assetId => requestBody.assetIdToUrlMap[assetId])
@@ -4661,24 +4663,64 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       );
       const finalVideoUrl = uploadResult.url;
 
+      // Extract and upload thumbnail from final video
+      let thumbnailUrl: string | null = null;
+      try {
+        fastify.log.info({ projectId }, 'Extracting thumbnail from final video');
+        const { extractThumbnail } = await import('../services/videoProcessor');
+        const thumbnailResult = await extractThumbnail(finalVideoPath, user.sub, projectId);
+        thumbnailUrl = thumbnailResult.thumbnailUrl;
+        fastify.log.info({ projectId, thumbnailUrl }, 'Thumbnail extracted and uploaded successfully');
+      } catch (thumbnailError: any) {
+        fastify.log.warn({ projectId, error: thumbnailError.message }, 'Failed to extract thumbnail, continuing without it');
+        // Don't fail the entire request if thumbnail extraction fails
+      }
+
       // Cleanup temp directory
       await fs.rm(tempDir, { recursive: true, force: true });
 
       // Update project config and database, and mark project as completed
       currentConfig.finalVideoUrl = finalVideoUrl;
       currentConfig.videoUrl = finalVideoUrl; // Also save as videoUrl for compatibility
+      if (thumbnailUrl) {
+        currentConfig.thumbnailUrl = thumbnailUrl;
+      }
 
-      // Try to update final_video_url column and mark as completed
+      // Try to update final_video_url and thumbnail_url columns and mark as completed
       try {
-        await query(
-          `UPDATE projects 
-           SET final_video_url = $1, 
-               status = 'completed',
-               config = $2, 
-               updated_at = NOW() 
-           WHERE id = $3`,
-          [finalVideoUrl, JSON.stringify(currentConfig), projectId]
+        // Check if thumbnail_url column exists
+        const columnCheck = await query(
+          `SELECT EXISTS (
+            SELECT 1 
+            FROM information_schema.columns 
+            WHERE table_name = 'projects' 
+            AND column_name = 'thumbnail_url'
+          ) as exists`
         );
+        const hasThumbnailUrlColumn = columnCheck[0]?.exists || false;
+
+        if (hasThumbnailUrlColumn && thumbnailUrl) {
+          await query(
+            `UPDATE projects 
+             SET final_video_url = $1, 
+                 thumbnail_url = $2,
+                 status = 'completed',
+                 config = $3, 
+                 updated_at = NOW() 
+             WHERE id = $4`,
+            [finalVideoUrl, thumbnailUrl, JSON.stringify(currentConfig), projectId]
+          );
+        } else {
+          await query(
+            `UPDATE projects 
+             SET final_video_url = $1, 
+                 status = 'completed',
+                 config = $2, 
+                 updated_at = NOW() 
+             WHERE id = $3`,
+            [finalVideoUrl, JSON.stringify(currentConfig), projectId]
+          );
+        }
       } catch (dbError: any) {
         // If final_video_url column doesn't exist, just update config and status
         if (dbError.message && dbError.message.includes('final_video_url')) {
@@ -4712,16 +4754,213 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       fastify.log.info({ 
         projectId, 
         finalVideoUrl: finalVideoUrl,
+        thumbnailUrl: thumbnailUrl,
         hasMusic: !!musicUrl,
         status: 'completed'
-      }, 'Final video stitched, uploaded to S3, saved to database, and project marked as completed');
+      }, 'Final video stitched, uploaded to S3, thumbnail generated, saved to database, and project marked as completed');
 
       return reply.send({ 
         success: true,
         videoUrl: finalVideoUrl,
         finalVideoUrl, // For backward compatibility
+        thumbnailUrl: thumbnailUrl || undefined,
         sceneCount: sceneVideoUrls.length,
         hasMusic: !!musicUrl
+      });
+    } catch (error: any) {
+      fastify.log.error({ projectId, error: error.message, stack: error.stack }, 'Failed to stitch scenes');
+      return reply.code(500).send({ 
+        error: 'Failed to stitch scenes',
+        message: error.message 
+      });
+    }
+  });
+
+  // Alias endpoint for stitch-scenes (used by ProjectEditorPage)
+  // This is the same as /stitch but with a different route name for compatibility
+  fastify.post('/projects/:id/stitch-scenes', {
+    preHandler: [authenticateCognito],
+    schema: {
+      description: 'Stitch all scenes together (alias for /stitch endpoint)',
+      tags: ['projects'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+        },
+      },
+      body: {
+        type: 'object',
+        properties: {
+          sceneUrls: { type: 'array', items: { type: 'string' } },
+        },
+        additionalProperties: false,
+      },
+    },
+  }, async (request: FastifyRequest<{ Params: { id: string }; Body?: { sceneUrls?: string[] } }>, reply: FastifyReply) => {
+    const user = getCognitoUser(request);
+    const { id: projectId } = request.params;
+
+    try {
+      // Verify project belongs to user
+      const project = await queryOne(
+        'SELECT id, config FROM projects WHERE id = $1 AND user_id = $2',
+        [projectId, user.sub]
+      );
+
+      if (!project) {
+        return reply.code(404).send({ error: 'Project not found' });
+      }
+
+      // Get scenes with video URLs for stitching
+      // If sceneUrls are provided in body, use those; otherwise fetch from database
+      const body = request.body || {};
+      let sceneVideoUrls: string[] = [];
+
+      if (body.sceneUrls && Array.isArray(body.sceneUrls) && body.sceneUrls.length > 0) {
+        // Use provided scene URLs
+        sceneVideoUrls = body.sceneUrls.filter((url: string) => url && url.trim() !== '');
+      } else {
+        // Fetch from database
+        const scenes = await query(
+          `SELECT id, scene_number, video_url, prompt 
+           FROM scenes 
+           WHERE project_id = $1 AND video_url IS NOT NULL AND video_url != ''
+           ORDER BY scene_number ASC`,
+          [projectId]
+        );
+        sceneVideoUrls = scenes.map((s: any) => s.video_url).filter((url: string) => url) as string[];
+      }
+
+      if (sceneVideoUrls.length === 0) {
+        return reply.code(400).send({ error: 'No valid scene video URLs found' });
+      }
+
+      // Get music URL from project config
+      const currentConfig = typeof project.config === 'string' 
+        ? JSON.parse(project.config) 
+        : (project.config || {});
+      const musicUrl = currentConfig.musicUrl;
+
+      // Stitch videos
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vidverse-stitch-'));
+      const concatVideoPath = path.join(tempDir, 'concat.mp4');
+      const finalVideoPath = path.join(tempDir, 'final.mp4');
+
+      const { concatenateVideos, addAudioToVideo } = await import('../services/videoProcessor');
+      const { uploadGeneratedVideo } = await import('../services/storage');
+
+      // Concatenate all scene videos
+      await concatenateVideos(sceneVideoUrls, concatVideoPath);
+      fastify.log.info({ projectId }, 'Videos concatenated successfully');
+
+      // Add music if available
+      if (musicUrl) {
+        fastify.log.info({ projectId, musicUrl: musicUrl }, 'Adding music to stitched video');
+        await addAudioToVideo(concatVideoPath, musicUrl, finalVideoPath);
+        fastify.log.info({ projectId }, 'Music added to video successfully');
+      } else {
+        // No music, use concatenated video as final
+        await fs.copyFile(concatVideoPath, finalVideoPath);
+        fastify.log.info({ projectId }, 'No music available, using concatenated video as final');
+      }
+
+      // Upload final video
+      const finalVideoBuffer = await fs.readFile(finalVideoPath);
+      const uploadResult = await uploadGeneratedVideo(
+        finalVideoBuffer,
+        user.sub,
+        projectId,
+        'final-stitched.mp4'
+      );
+      const finalVideoUrl = uploadResult.url;
+
+      // Extract and upload thumbnail from final video (always update, even if thumbnail exists)
+      let thumbnailUrl: string | null = null;
+      try {
+        fastify.log.info({ projectId }, 'Extracting thumbnail from final video (updating existing thumbnail if present)');
+        const { extractThumbnail } = await import('../services/videoProcessor');
+        const thumbnailResult = await extractThumbnail(finalVideoPath, user.sub, projectId);
+        thumbnailUrl = thumbnailResult.thumbnailUrl;
+        fastify.log.info({ projectId, thumbnailUrl }, 'Thumbnail extracted and uploaded successfully (overwrites existing thumbnail)');
+      } catch (thumbnailError: any) {
+        fastify.log.warn({ projectId, error: thumbnailError.message }, 'Failed to extract thumbnail, continuing without it');
+        // Don't fail the entire request if thumbnail extraction fails
+      }
+
+      // Cleanup temp directory
+      await fs.rm(tempDir, { recursive: true, force: true });
+
+      // Update project config and database
+      currentConfig.finalVideoUrl = finalVideoUrl;
+      currentConfig.videoUrl = finalVideoUrl; // Also save as videoUrl for compatibility
+      if (thumbnailUrl) {
+        currentConfig.thumbnailUrl = thumbnailUrl; // Always update thumbnail URL if generated
+      }
+
+      // Try to update final_video_url and thumbnail_url columns
+      try {
+        // Check if thumbnail_url column exists
+        const columnCheck = await query(
+          `SELECT EXISTS (
+            SELECT 1 
+            FROM information_schema.columns 
+            WHERE table_name = 'projects' 
+            AND column_name = 'thumbnail_url'
+          ) as exists`
+        );
+        const hasThumbnailUrlColumn = columnCheck[0]?.exists || false;
+
+        if (hasThumbnailUrlColumn && thumbnailUrl) {
+          await query(
+            `UPDATE projects 
+             SET final_video_url = $1, 
+                 thumbnail_url = $2,
+                 config = $3, 
+                 updated_at = NOW() 
+             WHERE id = $4`,
+            [finalVideoUrl, thumbnailUrl, JSON.stringify(currentConfig), projectId]
+          );
+        } else {
+          await query(
+            `UPDATE projects 
+             SET final_video_url = $1, 
+                 config = $2, 
+                 updated_at = NOW() 
+             WHERE id = $3`,
+            [finalVideoUrl, JSON.stringify(currentConfig), projectId]
+          );
+        }
+      } catch (dbError: any) {
+        // If final_video_url column doesn't exist, just update config
+        if (dbError.message && dbError.message.includes('final_video_url')) {
+          fastify.log.warn({ projectId, error: dbError.message }, 'final_video_url column does not exist, updating config only');
+          await query(
+            `UPDATE projects 
+             SET config = $1, 
+                 updated_at = NOW() 
+             WHERE id = $2`,
+            [JSON.stringify(currentConfig), projectId]
+          );
+        } else {
+          fastify.log.error({ projectId, error: dbError.message }, 'Failed to save final video URL to database');
+          throw dbError;
+        }
+      }
+
+      fastify.log.info({ 
+        projectId, 
+        finalVideoUrl: finalVideoUrl,
+        thumbnailUrl: thumbnailUrl,
+        hasMusic: !!musicUrl,
+        sceneCount: sceneVideoUrls.length
+      }, 'Final video stitched, uploaded to S3, thumbnail updated, saved to database');
+
+      return reply.send({ 
+        success: true,
+        videoUrl: finalVideoUrl,
+        thumbnailUrl: thumbnailUrl || undefined,
+        sceneCount: sceneVideoUrls.length
       });
     } catch (error: any) {
       fastify.log.error({ projectId, error: error.message, stack: error.stack }, 'Failed to stitch scenes');

@@ -155,36 +155,43 @@ When a user provides a basic concept (2-3 lines), you must generate a COMPLETE s
 2. **Assets Array**: Extract all key visual assets mentioned in the script. Each asset should have:
    - name: A descriptive name (e.g., "Vintage Tour Bus", "Desert Highway", "Lead Character Portrait")
    - prompt: A detailed prompt for generating that asset as an image
-   - CRITICAL: Generate EXACTLY 3 to 5 assets (no more, no less). Prioritize the most important visual elements.
+   - category: Asset type - one of: "character", "environment", "prop", "style-reference", "ambience"
+   - CRITICAL: Generate a maximum of 5 assets. Prioritize the most important visual elements.
+   - CRITICAL: LEAD CHARACTERS must be included in Scene 1. Generate lead character assets (main character portraits, key personas) and ensure they are assigned to Scene 1 in the sceneAssetMap. Do not delay character introductions - they must appear in the first scene.
    - IMPORTANT: When generating assets, prioritize LEAD CHARACTERS when applicable (e.g., main character portraits, key personas). For products like sunglasses, generate only ONE pair of glasses asset, not multiple variations. Focus on unique, distinct assets rather than duplicates.
+   - Track which assets appear in multiple scenes - prioritize generating assets with higher usage across scenes
 
 3. **Scenes Array**: Break the script into logical scenes. Each scene should have:
    - sceneNumber: Sequential number (1, 2, 3, etc.)
    - prompt: EXTENSIVE scene description with visual specifications (MINIMUM 400-600 characters per scene)
-   - assetIds: Array of asset names/IDs that belong to this scene (matching asset names from assets array)
+   - assetIds: Array of asset names/IDs that belong to this scene (matching asset names from assets array). BE CONSERVATIVE: Only include assets that are ACTUALLY needed and visible in this specific scene. Do NOT try to use all assets in every scene - only reference assets when they are essential to the scene's story or visual requirements. It's better to have fewer assets per scene than to overload a scene with too many asset references.
+   - transitionNotes: Brief description of how this scene connects to the previous one (maintains continuity, lighting transitions, camera movement, etc.)
    - CRITICAL SCENE PLANNING: Each scene must be MAXIMUM 8 seconds long. Calculate the number of scenes needed: ${projectDuration} seconds ÷ 8 seconds per scene = ${Math.ceil(projectDuration / 8)} scenes minimum. Generate ${targetSceneCount} scenes based on the project duration (${projectDuration} seconds). For short videos (≤30s), use 3-4 scenes. For medium videos (31-60s), use 5-8 scenes. For long videos (>60s), use 8-15 scenes. Each scene duration must be ≤ 8 seconds.
+   - CRITICAL: Scene 1 MUST introduce all lead/main characters immediately. Do not delay character introductions to later scenes - introduce them in the first scene to establish the story quickly and avoid slow pacing. Lead characters should appear and be established in Scene 1.
    - CONSISTENCY REQUIREMENTS: All scenes must maintain:
      * The same visual theme and aesthetic style
      * Consistent camera style (e.g., if using "cinematic wide shots", maintain that style throughout)
      * Consistent color palette and lighting approach
      * Consistent character appearances (if characters are present)
      * Smooth visual transitions between scenes
-   - SCENE PROMPT DETAILS: Each scene prompt must be 400-600+ characters and include:
-     * Detailed visual description of the scene
-     * Specific camera angle, movement, and framing
-     * Lighting conditions and mood
-     * Color palette and visual style
-     * Character positioning and actions (if applicable)
-     * Environmental details and setting
-     * Reference to maintaining consistency with previous scenes
+   - SCENE PROMPT DETAILS: Each scene prompt must be 400-600+ characters with PRIMARY focus on:
+     * PRIMARY: Story progression, narrative flow, concept, and emotional beats
+     * PRIMARY: What happens in the scene, actions, and story elements
+     * SECONDARY: Visual consistency, ambience, and continuity (achieved primarily through asset references)
+     * SECONDARY: Camera angle, movement, and framing
+     * SECONDARY: Lighting conditions and mood
+     * SECONDARY: Environmental details and setting
+     * CRITICAL: Do NOT re-describe character appearances in detail - reference the asset by name instead (e.g., "using [Asset Name]" or "featuring the character from [Asset Name]")
+     * CRITICAL: Character consistency is handled by the assets - focus scene description on story, not character appearance details
+     * CRITICAL: BE CONSERVATIVE with asset references - only reference assets when they are essential to the scene. Do NOT try to include all assets in every scene. Each scene should only reference the minimum number of assets needed for that specific scene's story and visual requirements. Too many asset references in a single scene can make it difficult to properly incorporate them all.
 
 4. **Music Prompt**: Generate a JSON-formatted music prompt with:
-   - lyrics: Song lyrics or description (10-600 characters, if applicable)
-   - prompt: Musical style description ONLY (10-300 characters, keep it short and focused on style like "Jazz, Smooth Jazz, Romantic, Dreamy" or "Electronic, Upbeat, Energetic")
+   - lyrics: ACTUAL song lyrics (10-600 characters, minimum 10 characters required). Lyrics can be multi-line using newline characters (\\n) to separate lines. Supports special markers: [Intro], [Verse], [Chorus], [Bridge], [Outro] to structure the lyrics. If the music prompt indicates "no lyrics", "subtle lyrics", "instrumental", or similar, generate appropriate subtle, minimal, non-intrusive vocalizations that match the music style (e.g., for orchestral: "Ah", "Ooh", gentle humming; for jazz: "La la la", "Mm hmm", soft scatting; for ambient: "Hmm", "Ah", breathy textures). DO NOT use random repeated characters like "oooooo" or meaningless text. The vocalizations should be musically appropriate, minimal (10-50 characters typically), and blend seamlessly with the instrumental music. DO NOT put music descriptions, instrumental descriptions, or style descriptions here - those belong in the "prompt" field. For instrumental music, always use appropriate subtle vocalizations (at least 10 characters) rather than leaving empty or using random characters.
+   - prompt: Musical style description INCLUDING duration in seconds (e.g., "Romantic French Café Jazz, Acoustic Guitar, Soft Accordion, Ambient, Dreamy, Warm, 60 seconds" or "Electronic, Upbeat, Energetic, 30 seconds"). The prompt must include the duration at the end (e.g., "${projectDuration} seconds") to match the total video duration of ${projectDuration} seconds. This is where you describe the musical style, instruments, mood, and atmosphere.
    - bitrate: "320" (default)
    - sample_rate: "44100" (default)
    - audio_format: "mp3" (default)
-   - CRITICAL: The prompt field must be 10-300 characters and contain ONLY the musical style/genre description. Do NOT include lyrics, descriptions, or explanations in the prompt field.
+   - CRITICAL: The prompt field must include the musical style/genre description AND the duration in seconds at the end (e.g., "Jazz, Smooth Jazz, Romantic, Dreamy, ${projectDuration} seconds"). Do NOT include a separate duration field - duration must be part of the prompt text.
 
 CRITICAL FORMATTING REQUIREMENTS:
 - Your response must be in PLAIN TEXT format for user readability
@@ -193,24 +200,47 @@ CRITICAL FORMATTING REQUIREMENTS:
 - The JSON structure must be:
 {
   "script": "Full detailed script text here...",
+  "globalStyle": {
+    "colorPalette": "Description of overall color scheme (e.g., 'warm earth tones', 'cool blues and grays')",
+    "lighting": "Overall lighting mood (e.g., 'golden hour', 'soft natural light', 'dramatic shadows')",
+    "cameraStyle": "Overall camera approach (e.g., 'cinematic wide shots', 'handheld documentary style', 'smooth tracking shots')",
+    "visualAesthetic": "Overall visual style description (e.g., 'modern minimalist', 'vintage film', 'high-tech futuristic')"
+  },
   "assets": [
     {
       "name": "Asset Name 1",
-      "prompt": "Detailed prompt for generating this asset..."
+      "prompt": "Detailed prompt for generating this asset...",
+      "category": "character"
     },
     ...
   ],
   "scenes": [
     {
       "sceneNumber": 1,
-      "prompt": "EXTENSIVE scene description (400-600+ characters) with visual specifications, camera style, lighting, and consistency notes...",
-      "assetIds": ["Asset Name 1", "Asset Name 2"]
+      "prompt": "EXTENSIVE scene description (400-600+ characters) focusing on story/concept first, then visual consistency and ambience...",
+      "assetIds": ["Asset Name 1", "Asset Name 2"],
+      "transitionNotes": "How this scene connects to previous (if scene 1, describe opening style)"
     },
     ...
   ],
+  "sceneAssetMap": {
+    "1": [1, 2],
+    "2": [3],
+    ...
+  },
+  "assetUsage": {
+    "Asset Name 1": 4,
+    "Asset Name 2": 2,
+    ...
+  },
+  "sceneDependencies": {
+    "1": ["Asset Name 1", "Asset Name 2"],
+    "2": ["Asset Name 1", "Asset Name 3"],
+    ...
+  },
   "music": {
-    "lyrics": "Song lyrics or description (10-600 characters)",
-    "prompt": "Musical style description ONLY (10-300 characters, e.g., 'Jazz, Smooth Jazz, Romantic, Dreamy')",
+    "lyrics": "Actual song lyrics or subtle vocalizations (10-600 characters, minimum 10 required). Can be multi-line using newline characters to separate lines. Supports markers: [Intro], [Verse], [Chorus], [Bridge], [Outro]. For instrumental music or when prompt indicates 'no lyrics'/'subtle lyrics', use musically appropriate minimal vocalizations (e.g., orchestral: 'Ah', 'Ooh'; jazz: 'La la la', 'Mm hmm'; ambient: 'Hmm', breathy textures). DO NOT use random repeated characters. Must be musically appropriate and blend with the music style.",
+    "prompt": "Musical style description INCLUDING duration (e.g., 'Jazz, Smooth Jazz, Romantic, Dreamy, ${projectDuration} seconds')",
     "bitrate": "320",
     "sample_rate": "44100",
     "audio_format": "mp3"
@@ -218,22 +248,40 @@ CRITICAL FORMATTING REQUIREMENTS:
 }
 
 - Include EXTENSIVE details in each scene prompt (400-600+ characters minimum)
-- Establish and maintain consistent theme, camera style, and visual aesthetic across ALL scenes
-- Determine which assets belong to which scenes based on the script
+- Scene prompts should focus PRIMARILY on story, concept, and narrative flow
+- Visual consistency, ambience, and character consistency are SECONDARY and achieved through asset references
+- Do NOT re-describe character appearances in scene prompts - reference assets by name instead
+- Include a "globalStyle" object with overall color palette, lighting, camera style, and visual aesthetic (scenes reference this)
+- Include a "sceneAssetMap" object mapping scene numbers (as strings) to arrays of asset numbers (as integers, 1-based index matching the asset's position in the assets array) for easy import to checkboxes (e.g., {"1": [1, 2], "2": [3]})
+- Include an "assetUsage" object showing how many scenes each asset appears in (helps prioritize asset generation)
+- Include a "sceneDependencies" object mapping scene numbers to their required asset names (validates asset references)
+- Each scene should include "transitionNotes" describing how it connects to the previous scene (maintains continuity)
+- Each asset should include a "category" field: "character", "environment", "prop", "style-reference", or "ambience"
+- Establish and maintain consistent theme, camera style, and visual aesthetic across ALL scenes (via globalStyle and assets)
+- Determine which assets belong to which scenes based on the script - BE CONSERVATIVE: only assign assets to scenes where they are actually needed and visible. Do NOT try to use all assets in every scene.
+- Track asset usage frequency - prioritize generating assets that appear in multiple scenes, but remember that not every asset needs to appear in every scene
 - Make the script comprehensive and cinematic
 - Ensure all prompts are detailed enough for AI video/image generation
 
 After generating the JSON, provide a brief summary in plain text explaining what was generated.
 
 IMPORTANT CONSTRAINTS:
-- Generate EXACTLY 3 to 5 assets (prioritize the most important visual elements, especially lead characters when applicable)
+- Generate a maximum of 5 assets (prioritize the most important visual elements, especially lead characters when applicable)
 - For products like sunglasses, generate only ONE pair, not multiple variations
 - Generate ${targetSceneCount} scenes based on the project duration (${projectDuration} seconds)
 - Each scene must be MAXIMUM 8 seconds long (plan accordingly: ${projectDuration}s ÷ 8s = ${Math.ceil(projectDuration / 8)} scenes minimum)
-- Each scene prompt must be 400-600+ characters with extensive visual details
-- ALL scenes must maintain consistent theme, camera style, color palette, and visual aesthetic
-- Map assets to scenes based on which assets appear in each scene
-- Music prompt field must be 10-300 characters and contain ONLY the musical style/genre (e.g., "Jazz, Smooth Jazz, Romantic, Dreamy" or "Electronic, Upbeat, Energetic"). Do NOT include lyrics, descriptions, or explanations in the prompt field. Keep it short and style-focused only.`
+- Each scene prompt must be 400-600+ characters focusing PRIMARILY on story/concept, SECONDARILY on visual consistency
+- Do NOT re-describe character appearances in scenes - reference assets by name instead (character consistency handled by assets)
+- ALL scenes must maintain consistent theme, camera style, color palette, and visual aesthetic (achieved through globalStyle object and asset references)
+- Map assets to scenes conservatively - only assign assets to scenes where they are actually needed and visible. Do NOT try to include all assets in every scene. Each scene should only reference the minimum number of assets required for that scene's story and visual needs.
+- Include "globalStyle" object with overall visual style (color palette, lighting, camera style, visual aesthetic)
+- Include "sceneAssetMap" in JSON output mapping scene numbers (as strings) to arrays of asset numbers (as integers, 1-based index matching the asset's position in the assets array) for easy import to checkboxes (e.g., {"1": [1, 2], "2": [3]})
+- Include "assetUsage" object showing frequency of each asset across scenes (e.g., {"Asset Name 1": 4, "Asset Name 2": 2})
+- Include "sceneDependencies" object mapping each scene to its required assets (validates all asset references exist)
+- Include "transitionNotes" in each scene describing continuity with previous scene
+- Include "category" field in each asset: "character", "environment", "prop", "style-reference", or "ambience"
+- Music prompt field must include the musical style/genre AND duration in seconds at the end (e.g., "Jazz, Smooth Jazz, Romantic, Dreamy, ${projectDuration} seconds" or "Electronic, Upbeat, Energetic, ${projectDuration} seconds"). The duration must be included in the prompt text, not as a separate field. The music should be approximately ${projectDuration} seconds long.
+- CRITICAL: The "lyrics" field must contain ONLY actual song lyrics or subtle vocalizations (minimum 10 characters required). Lyrics can be multi-line using newline characters to separate lines and support special markers: [Intro], [Verse], [Chorus], [Bridge], [Outro] to structure the lyrics. When the music prompt indicates "no lyrics", "subtle lyrics", "instrumental", or similar, generate musically appropriate subtle vocalizations that match the music style (e.g., orchestral: "Ah", "Ooh"; jazz: "La la la", "Mm hmm"; ambient: "Hmm", breathy textures). DO NOT use random repeated characters like "oooooo" or meaningless text - the vocalizations must be musically appropriate and minimal (typically 10-50 characters). The vocalizations should blend seamlessly with the instrumental music. DO NOT put music style descriptions, instrumental descriptions, or atmosphere descriptions in the lyrics field - those belong in the "prompt" field.`
         : `You are an expert AI video creation assistant helping users craft exceptional video projects. Your role is to:
 
 1. **Context Awareness**: 
@@ -345,22 +393,49 @@ CRITICAL: Review the conversation history and project context before asking any 
       // Add current user message
       messages.push({ role: 'user', content: data.message });
 
-      // Call OpenRouter API
-      const openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.openrouter.apiKey}`,
-        'HTTP-Referer': config.app.frontendUrl || 'https://vidverseai.com',
-          'X-Title': 'VidVerse AI Assistant',
-        },
-        body: JSON.stringify({
-          model: data.model || config.openrouter.model || 'anthropic/claude-4.5-sonnet',
-          messages: messages,
-          temperature: 0.8, // Slightly higher for more creative and conversational responses
-          max_tokens: 16000, // Dramatically increased for very long, detailed responses
-        }),
-      });
+      // Call OpenRouter API with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 seconds timeout for large AI responses
+
+      let openrouterResponse;
+      try {
+        openrouterResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.openrouter.apiKey}`,
+            'HTTP-Referer': config.app.frontendUrl || 'https://vidverseai.com',
+            'X-Title': 'VidVerse AI Assistant',
+          },
+          body: JSON.stringify({
+            model: data.model || config.openrouter.model || 'anthropic/claude-4.5-sonnet',
+            messages: messages,
+            temperature: 0.8, // Slightly higher for more creative and conversational responses
+            max_tokens: 16000, // Dramatically increased for very long, detailed responses
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+      } catch (fetchError: any) {
+        clearTimeout(timeoutId);
+        if (fetchError.name === 'AbortError' || fetchError.message?.includes('timeout') || fetchError.message?.includes('Timeout')) {
+          fastify.log.error({ error: fetchError.message }, 'OpenRouter API request timeout');
+          return reply.code(504).send({
+            error: 'Request timeout',
+            message: 'The AI service took too long to respond. Please try again with a shorter message or try again later.',
+          });
+        }
+        // Handle connection errors
+        if (fetchError.message?.includes('ECONNREFUSED') || fetchError.message?.includes('ENOTFOUND') || fetchError.message?.includes('Connect Timeout')) {
+          fastify.log.error({ error: fetchError.message }, 'OpenRouter API connection error');
+          return reply.code(503).send({
+            error: 'Connection error',
+            message: 'Unable to connect to the AI service. Please check your internet connection and try again.',
+          });
+        }
+        // Re-throw other errors
+        throw fetchError;
+      }
 
       if (!openrouterResponse.ok) {
         const errorText = await openrouterResponse.text();

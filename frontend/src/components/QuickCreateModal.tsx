@@ -83,9 +83,6 @@ function formatProjectDataAsText(data: any): string {
     if (data.music.prompt) {
       formatted += `Style: ${data.music.prompt}\n`;
     }
-    if (data.music.duration) {
-      formatted += `Duration: ${data.music.duration} seconds\n`;
-    }
     if (data.music.lyrics) {
       formatted += `Lyrics/Description: ${data.music.lyrics}\n`;
     }

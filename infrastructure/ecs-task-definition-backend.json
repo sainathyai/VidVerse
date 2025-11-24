@@ -49,6 +49,14 @@
         {
           "name": "DATABASE_SSL_CA_PATH",
           "value": "./certs/rds-ca-rsa2048-g1.pem"
+        },
+        {
+          "name": "FFMPEG_PATH",
+          "value": "/usr/bin/ffmpeg"
+        },
+        {
+          "name": "FFPROBE_PATH",
+          "value": "/usr/bin/ffprobe"
         }
       ],
       "secrets": [

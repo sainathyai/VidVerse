@@ -9,6 +9,7 @@ const imageGenerationSchema = z.object({
   aspectRatio: z.string().optional(),
   projectId: z.string().uuid().optional(),
   filename: z.string().optional(),
+  assetNumber: z.number().int().positive().optional(), // Asset position/order (1-based)
 });
 
 const sanitizeFilename = (name: string): string => {
@@ -227,6 +228,7 @@ export async function imageRoutes(
             imageModelId: body.imageModelId || 'google/imagen-4-ultra',
             aspectRatio: body.aspectRatio,
             source: 'generate-image',
+            assetNumber: body.assetNumber || null, // Save asset order/position
           };
 
           const insertResult = await query(

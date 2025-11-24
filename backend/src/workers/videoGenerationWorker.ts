@@ -224,6 +224,20 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
         projectId,
         'output.mp4'
       );
+      await job.updateProgress(92);
+
+      // 6.5. Extract and upload thumbnail from final video
+      let thumbnailUrl: string | null = null;
+      try {
+        console.log(`[WORKER] Extracting thumbnail from final video for project ${projectId}`);
+        const { extractThumbnail } = await import('../services/videoProcessor');
+        const thumbnailResult = await extractThumbnail(finalVideoPath, userId, projectId);
+        thumbnailUrl = thumbnailResult.thumbnailUrl;
+        console.log(`[WORKER] Thumbnail extracted and uploaded successfully: ${thumbnailUrl}`);
+      } catch (thumbnailError: any) {
+        console.warn(`[WORKER] Failed to extract thumbnail for project ${projectId}, continuing without it:`, thumbnailError.message);
+        // Don't fail the entire job if thumbnail extraction fails
+      }
       await job.updateProgress(95);
 
       // 7. Update project in database
@@ -233,10 +247,37 @@ export const videoGenerationWorker: Worker<VideoGenerationJobData, VideoGenerati
       currentConfig.videoUrl = uploadResult.url;
       currentConfig.finalVideoUrl = uploadResult.url; // Also save as finalVideoUrl for frontend compatibility
       currentConfig.sceneUrls = sceneVideos; // Save scene URLs
-      await query(
-        `UPDATE projects SET status = 'completed', config = $1, updated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(currentConfig), projectId]
+      if (thumbnailUrl) {
+        currentConfig.thumbnailUrl = thumbnailUrl;
+      }
+
+      // Check if thumbnail_url column exists and update it
+      const columnCheck = await query(
+        `SELECT EXISTS (
+          SELECT 1 
+          FROM information_schema.columns 
+          WHERE table_name = 'projects' 
+          AND column_name = 'thumbnail_url'
+        ) as exists`
       );
+      const hasThumbnailUrlColumn = columnCheck[0]?.exists || false;
+
+      if (hasThumbnailUrlColumn && thumbnailUrl) {
+        await query(
+          `UPDATE projects 
+           SET status = 'completed', 
+               config = $1, 
+               thumbnail_url = $2,
+               updated_at = NOW() 
+           WHERE id = $3`,
+          [JSON.stringify(currentConfig), thumbnailUrl, projectId]
+        );
+      } else {
+        await query(
+          `UPDATE projects SET status = 'completed', config = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(currentConfig), projectId]
+        );
+      }
 
       // Cleanup temp files
       await fs.rm(tempDir, { recursive: true, force: true });

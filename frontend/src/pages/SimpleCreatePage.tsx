@@ -168,6 +168,7 @@ function SimpleCreateContent() {
         return null;
       }
 
+      // Sort assets by saved assetNumber from metadata, then by array index as fallback
       const imageAssets: AnchorImage[] = assets
         .filter(asset => asset.type === 'image')
         .slice(0, MAX_ANCHOR_ASSETS)
@@ -176,9 +177,10 @@ function SimpleCreateContent() {
           assetId: asset.id,
           url: asset.url,
           prompt: (asset.metadata?.prompt as string) || asset.filename || `Asset ${index + 1}`,
-          assetNumber: index + 1,
+          assetNumber: (asset.metadata?.assetNumber as number) || (index + 1), // Use saved assetNumber if available
           isTemporary: false,
-        }));
+        }))
+        .sort((a, b) => a.assetNumber - b.assetNumber); // Sort by assetNumber to preserve order
 
       const renumberedAssets = renumberAnchorImages(imageAssets);
       setGeneratedAnchorImages(renumberedAssets);
@@ -714,7 +716,7 @@ function SimpleCreateContent() {
                     ...scene,
                     // Keep prompt from backend (already merged from config)
                     // But update other properties from config
-                    selectedAssetIds: savedPrompt.selectedAssetIds || scene.selectedAssetIds,
+                    selectedAssetIds: savedPrompt.selectedAssetIds ? [...savedPrompt.selectedAssetIds] : (scene.selectedAssetIds ? [...scene.selectedAssetIds] : []), // Create new array copy to avoid reference sharing
                     extendPrevious: savedPrompt.extendPrevious !== undefined ? savedPrompt.extendPrevious : scene.extendPrevious,
                   };
                 }
@@ -731,7 +733,7 @@ function SimpleCreateContent() {
                 id: sp.id || `scene-${Date.now()}-${Math.random()}`,
                 prompt: sp.prompt || '',
                 extendPrevious: sp.extendPrevious || false,
-                selectedAssetIds: sp.selectedAssetIds || [],
+                selectedAssetIds: sp.selectedAssetIds ? [...sp.selectedAssetIds] : [], // Create new array copy to avoid reference sharing
                 isGenerating: false,
                 // No video URLs - they must come from database
               }));
@@ -741,7 +743,7 @@ function SimpleCreateContent() {
               const loadedScenes: Scene[] = config.script.scenes.map((scene: any, index: number) => ({
                 id: `scene-${index + 1}`,
                 prompt: scene.prompt || '',
-                extendPrevious: index > 0,
+                extendPrevious: index === 0 ? false : (index > 0), // First scene always false
                 selectedAssetIds: [],
                 isGenerating: false,
                 // No video URLs - they must come from database
@@ -757,7 +759,7 @@ function SimpleCreateContent() {
               id: sp.id || `scene-${Date.now()}-${Math.random()}`,
               prompt: sp.prompt || '',
               extendPrevious: sp.extendPrevious || false,
-              selectedAssetIds: sp.selectedAssetIds || [],
+              selectedAssetIds: sp.selectedAssetIds ? [...sp.selectedAssetIds] : [], // Create new array copy to avoid reference sharing
               isGenerating: false,
               // No video URLs - they must come from database
             }));
@@ -1666,6 +1668,7 @@ function SimpleCreateContent() {
           imageModelId,
           aspectRatio,
           projectId: projectId, // Always provide projectId so asset is saved
+          assetNumber: assetIndex + 1, // Save asset order/position
         }),
       }, token);
 
@@ -1791,7 +1794,8 @@ function SimpleCreateContent() {
         return;
       }
 
-      // Generate all assets in parallel FIRST (before deleting old ones)
+      // Generate all assets in parallel - update state as each completes to maintain slot consistency
+      // Each asset's slot position (index) is fixed and never changes, regardless of completion order
       const generationPromises = assetsToGenerate.map(async ({ prompt, index }) => {
         try {
           const result = await apiRequest<{ imageUrl: string; isTemporary?: boolean; message?: string; assetId?: string | null }>('/api/generate-image', {
@@ -1805,39 +1809,94 @@ function SimpleCreateContent() {
           }, token);
 
           if (result?.imageUrl) {
+            // Create the new image with assetNumber based on the original slot index (index + 1)
+            // This ensures asset 3 always goes to slot 3, even if it completes first
+            const newImage: AnchorImage = {
+              id: result.assetId || `anchor-${Date.now()}-${index}`,
+              assetId: result.assetId || undefined,
+              url: result.imageUrl,
+              prompt: prompt,
+              assetNumber: index + 1, // Fixed slot position - never changes
+              isTemporary: Boolean(result.isTemporary),
+            };
+
+            // Update state immediately when this asset completes
+            // This ensures assets appear in their correct slots as soon as they're ready
+            // CRITICAL: assetNumber is based on the original slot index (index + 1), never changes
+            setGeneratedAnchorImages(prev => {
+              // Remove any existing asset at this slot (assetNumber = index + 1)
+              const filtered = prev.filter(img => img.assetNumber !== (index + 1));
+              
+              // Add the new asset - it already has the correct assetNumber based on slot position
+              const updated = [...filtered, newImage];
+              
+              // Sort by assetNumber to maintain slot order in the array
+              // This ensures the UI displays assets in the correct order (1, 2, 3, etc.)
+              const sorted = updated.sort((a, b) => a.assetNumber - b.assetNumber);
+              
+              // DO NOT call renumberAnchorImages here - it would break slot-based numbering
+              // The assetNumber is already correct: slot 0 → assetNumber 1, slot 1 → assetNumber 2, etc.
+              return sorted;
+            });
+
+            // Convert placeholder slot IDs in scenes to actual asset IDs for this specific asset
+            setScenes(currentScenes => {
+              return currentScenes.map(scene => {
+                const updatedSelectedIds = scene.selectedAssetIds
+                  .map(id => {
+                    // Check if this is a placeholder slot ID for this asset's slot
+                    if (id === `slot-${index}`) {
+                      // Use the new asset's ID directly
+                      return newImage.id;
+                    }
+                    return id; // Keep other IDs as-is
+                  });
+                
+                return {
+                  ...scene,
+                  selectedAssetIds: updatedSelectedIds,
+                };
+              });
+            });
+
             return {
               index,
               result,
               prompt,
+              newImage,
             };
           }
           return null;
         } catch (error: any) {
           console.error(`Error generating asset ${index + 1}:`, error);
+          // Mark this asset as no longer generating
+          setIsGeneratingAssets(prev => {
+            const newState = [...prev];
+            if (newState.length > index) {
+              newState[index] = false;
+            }
+            return newState;
+          });
           return { index, error: error.message || 'Unknown error' };
         }
       });
 
-      const results = await Promise.all(generationPromises);
+      // Wait for all promises to complete (for error handling and cleanup)
+      const results = await Promise.allSettled(generationPromises);
 
-      // Process results
+      // Process results for error reporting and final cleanup
       const newImages: AnchorImage[] = [];
       const errors: Array<{ index: number; error: string }> = [];
 
-      results.forEach((result) => {
-        if (!result) return;
-        if ('error' in result) {
-          errors.push({ index: result.index, error: result.error });
-        } else {
-          const newImage: AnchorImage = {
-            id: result.result.assetId || `anchor-${Date.now()}-${result.index}`,
-            assetId: result.result.assetId || undefined,
-            url: result.result.imageUrl,
-            prompt: result.prompt,
-            assetNumber: result.index + 1,
-            isTemporary: Boolean(result.result.isTemporary),
-          };
-          newImages.push(newImage);
+      results.forEach((settledResult) => {
+        if (settledResult.status === 'fulfilled' && settledResult.value) {
+          const result = settledResult.value;
+          if ('error' in result) {
+            errors.push({ index: result.index, error: result.error });
+          } else if (result.newImage) {
+            // Image was already added to state, just track it for cleanup
+            newImages.push(result.newImage);
+          }
         }
       });
 
@@ -1863,70 +1922,49 @@ function SimpleCreateContent() {
           await Promise.all(deletePromises);
         }
 
-        // Update state with new images (replace old ones)
+        // Final state update - assets were already added individually above
+        // This is just to ensure consistency and handle any edge cases
+        // DO NOT renumber - assets already have correct slot-based assetNumbers
         setGeneratedAnchorImages(prev => {
-          // Filter out old assets that were replaced and add new ones
-          const filtered = prev.filter(img => !assetNumbersToReplace.has(img.assetNumber));
+          // Assets were already added individually with correct assetNumbers
+          // Just ensure they're sorted by assetNumber for display
+          const sorted = [...prev].sort((a, b) => a.assetNumber - b.assetNumber);
           
-          // Sort newImages by assetNumber to ensure correct slot order
-          const sortedNewImages = [...newImages].sort((a, b) => a.assetNumber - b.assetNumber);
+          // Verify all assets have correct slot-based numbering (no gaps, sequential from 1)
+          // If there are gaps, that's okay - we don't want to renumber and break slot positions
+          return sorted;
+        });
           
-          // Merge filtered and new images, ensuring they're in the correct slot order
-          // Create a map to efficiently merge by assetNumber
-          const assetMap = new Map<number, AnchorImage>();
-          
-          // Add existing assets (not being replaced)
-          filtered.forEach(img => {
-            assetMap.set(img.assetNumber, img);
+        // Convert placeholder slot IDs in scenes to actual asset IDs
+        // Use the newImages array we just created (assets were already added to state individually)
+        setScenes(currentScenes => {
+          return currentScenes.map(scene => {
+            const updatedSelectedIds = scene.selectedAssetIds
+              .map(id => {
+                // Check if this is a placeholder slot ID (format: "slot-{index}")
+                if (id.startsWith('slot-')) {
+                  const slotIndex = parseInt(id.replace('slot-', ''), 10);
+                  // Find the asset at this slot index (assetNumber = slotIndex + 1)
+                  // Use newImages array which has the assets we just generated
+                  const matchingAsset = newImages.find(img => img.assetNumber === slotIndex + 1);
+                  return matchingAsset ? matchingAsset.id : id; // Keep placeholder if asset not found yet
+                }
+                return id; // Already a real ID
+              })
+              .filter(id => {
+                // Remove placeholders that don't have matching assets yet, but keep real IDs
+                if (id.startsWith('slot-')) {
+                  const slotIndex = parseInt(id.replace('slot-', ''), 10);
+                  return newImages.some(img => img.assetNumber === slotIndex + 1);
+                }
+                return true; // Keep all real IDs
+              });
+            
+            return {
+              ...scene,
+              selectedAssetIds: updatedSelectedIds,
+            };
           });
-          
-          // Add/Replace with new images (sorted by assetNumber)
-          sortedNewImages.forEach(img => {
-            assetMap.set(img.assetNumber, img);
-          });
-          
-          // Convert map to array, sorted by assetNumber to maintain slot sequence
-          // This ensures assets are in the correct slot order regardless of completion order
-          // Each asset already has the correct assetNumber based on its original slot index (result.index + 1)
-          // So slot 0 → assetNumber 1, slot 1 → assetNumber 2, etc.
-          const merged = Array.from(assetMap.values()).sort((a, b) => a.assetNumber - b.assetNumber);
-          
-          // renumberAnchorImages will preserve slot-based numbering if assets are already sequential
-          // It only renumbers to fill gaps (e.g., if asset 2 was removed, asset 3 becomes asset 2)
-          // This ensures consistency: asset numbers always correspond to slot positions
-          const updated = renumberAnchorImages(merged);
-          
-          // Convert placeholder slot IDs in scenes to actual asset IDs
-          setScenes(currentScenes => {
-            return currentScenes.map(scene => {
-              const updatedSelectedIds = scene.selectedAssetIds
-                .map(id => {
-                  // Check if this is a placeholder slot ID (format: "slot-{index}")
-                  if (id.startsWith('slot-')) {
-                    const slotIndex = parseInt(id.replace('slot-', ''), 10);
-                    // Find the asset at this slot index (assetNumber = slotIndex + 1)
-                    const matchingAsset = updated.find(img => img.assetNumber === slotIndex + 1);
-                    return matchingAsset ? matchingAsset.id : id; // Keep placeholder if asset not found yet
-                  }
-                  return id; // Already a real ID
-                })
-                .filter(id => {
-                  // Remove placeholders that don't have matching assets yet, but keep real IDs
-                  if (id.startsWith('slot-')) {
-                    const slotIndex = parseInt(id.replace('slot-', ''), 10);
-                    return updated.some(img => img.assetNumber === slotIndex + 1);
-                  }
-                  return true; // Keep all real IDs
-                });
-              
-              return {
-                ...scene,
-                selectedAssetIds: updatedSelectedIds,
-              };
-            });
-          });
-          
-          return updated;
         });
 
         // Clear prompts for successfully generated assets
@@ -1944,15 +1982,16 @@ function SimpleCreateContent() {
       // Collapse all text boxes
       setExpandedAssetIndex(null);
 
-      // Show results
+      // Log results to console (no popup)
       if (errors.length > 0) {
-        alert(`${newImages.length} asset(s) generated successfully. ${errors.length} failed: ${errors.map(e => `Asset ${e.index + 1}: ${e.error}`).join(', ')}`);
+        console.warn(`${newImages.length} asset(s) generated successfully. ${errors.length} failed:`, errors);
       } else {
-        alert(`All ${newImages.length} asset(s) generated successfully!`);
+        console.log(`All ${newImages.length} asset(s) generated successfully!`);
       }
 
-      // Reload assets from database to ensure sync
-      await loadProjectAssets(projectId);
+      // DO NOT reload assets from database - it will renumber them incorrectly
+      // Assets are already in state with correct assetNumbers based on slot positions
+      // The database order might differ from slot order, causing assets to be jumbled
     } catch (error: any) {
       console.error('Error generating all assets:', error);
       alert(`Failed to generate assets: ${error.message || 'Unknown error'}`);
@@ -1998,6 +2037,10 @@ function SimpleCreateContent() {
             type: 'image',
             url: url,
             filename: file.name,
+            metadata: {
+              prompt: anchorImagePrompts[assetIndex] || file.name,
+              assetNumber: assetIndex + 1, // Save asset order/position
+            },
           }),
         },
         token
@@ -2039,12 +2082,39 @@ function SimpleCreateContent() {
   }, []);
 
   const handleSceneExtendPreviousChange = useCallback((sceneId: string, extend: boolean) => {
-    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, extendPrevious: extend } : s));
+    setScenes(prev => prev.map((s, index) => {
+      // First scene (index 0) can never have extendPrevious set to true
+      if (s.id === sceneId) {
+        if (index === 0 && extend) {
+          // Prevent setting extendPrevious to true for first scene
+          return { ...s, extendPrevious: false };
+        }
+        return { ...s, extendPrevious: extend };
+      }
+      return s;
+    }));
   }, []);
 
   const handleSceneSelectedAssetIdsChange = useCallback((sceneId: string, assetIds: string[]) => {
-    setScenes(prev => prev.map(s => s.id === sceneId ? { ...s, selectedAssetIds: assetIds } : s));
-  }, []);
+    setScenes(prev => prev.map(s => {
+      if (s.id !== sceneId) return s;
+      
+      // When manually changing selections, also update selectedAssetNumbers to match
+      // Find asset numbers for the selected asset IDs
+      const selectedAssetNumbers: number[] = assetIds
+        .map(assetId => {
+          const asset = generatedAnchorImages.find(img => img.id === assetId);
+          return asset ? asset.assetNumber : null;
+        })
+        .filter((num): num is number => num !== null);
+      
+      return {
+        ...s,
+        selectedAssetIds: assetIds,
+        selectedAssetNumbers: selectedAssetNumbers.length > 0 ? selectedAssetNumbers : undefined,
+      };
+    }));
+  }, [generatedAnchorImages]);
 
   const handleSceneGenerate = useCallback(async (sceneIndex: number, scene: Scene) => {
     if (!scene.prompt.trim()) {
@@ -2094,6 +2164,8 @@ function SimpleCreateContent() {
       }
 
       // Build request payload
+      // CRITICAL: First scene (sceneIndex 0) always prioritizes assets and never uses extendPrevious
+      const isFirstScene = sceneIndex === 0;
       const requestPayload = {
         sceneIndex,
         prompt: scene.prompt,
@@ -2103,10 +2175,10 @@ function SimpleCreateContent() {
         mood,
         colorPalette,
         pacing,
-        referenceImages,
-        previousSceneVideoUrl: previousSceneVideoUrl,
-        previousSceneLastFrame: previousSceneLastFrame,
-        useReferenceFrame: scene.extendPrevious && useReferenceFrame,
+        referenceImages: isFirstScene ? referenceImages : (scene.extendPrevious ? [] : referenceImages), // First scene always uses assets
+        previousSceneVideoUrl: isFirstScene ? undefined : previousSceneVideoUrl, // First scene never extends previous
+        previousSceneLastFrame: isFirstScene ? undefined : previousSceneLastFrame, // First scene never extends previous
+        useReferenceFrame: isFirstScene ? false : (scene.extendPrevious && useReferenceFrame), // First scene never uses extendPrevious
         continuous: continuous,
         withAudio: includeAudio, // Include audio only if user opts in
       };
@@ -2293,7 +2365,12 @@ function SimpleCreateContent() {
         // Try to find JSON-like structure in the input
         const jsonMatch = musicPrompt.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
-          const jsonStr = jsonMatch[0];
+          let jsonStr = jsonMatch[0];
+          
+          // Clean up trailing commas in JSON (make parser more lenient)
+          // Remove trailing commas before closing braces and brackets
+          jsonStr = jsonStr.replace(/,(\s*[}\]])/g, '$1');
+          
           const parsed = JSON.parse(jsonStr);
           
           // Extract lyrics (required)
@@ -2432,8 +2509,7 @@ function SimpleCreateContent() {
           // Still use the URL from the stitch response
         }
         
-        alert(`Successfully stitched ${result.sceneCount} scene(s)${result.hasMusic ? ' with music' : ''}!`);
-        console.log('Scenes stitched successfully:', finalUrl);
+        console.log(`Successfully stitched ${result.sceneCount} scene(s)${result.hasMusic ? ' with music' : ''}!`, finalUrl);
       }
     } catch (error: any) {
       console.error('Error stitching scenes:', error);
@@ -2521,7 +2597,7 @@ function SimpleCreateContent() {
             }
 
             // Convert asset numbers to actual asset IDs if assets already exist (for backend compatibility)
-            let finalSelectedAssetIds: string[] = existingScene?.selectedAssetIds || [];
+            let finalSelectedAssetIds: string[] = existingScene?.selectedAssetIds ? [...existingScene.selectedAssetIds] : []; // Create new array copy
             if (selectedAssetNumbers.length > 0 && generatedAnchorImages.length > 0) {
               // Assets exist - convert asset numbers to IDs for backend
               finalSelectedAssetIds = selectedAssetNumbers
@@ -2537,9 +2613,9 @@ function SimpleCreateContent() {
               ...existingScene, // Preserve existing properties (videoUrl, firstFrameUrl, lastFrameUrl, etc.)
               id: existingScene?.id || `scene-${scene.sceneNumber}`, // Keep existing ID if available
               prompt: scene.prompt, // Update prompt from import
-              extendPrevious: existingScene?.extendPrevious ?? (index > 0), // Preserve or set default
-              selectedAssetIds: finalSelectedAssetIds, // Asset IDs for backend (if assets exist)
-              selectedAssetNumbers: selectedAssetNumbers.length > 0 ? selectedAssetNumbers : undefined, // Asset numbers from script - source of truth for checkboxes
+              extendPrevious: index === 0 ? false : (existingScene?.extendPrevious ?? (index > 0)), // First scene always false, preserve or set default for others
+              selectedAssetIds: [...finalSelectedAssetIds], // Asset IDs for backend (if assets exist) - create new array copy
+              selectedAssetNumbers: selectedAssetNumbers.length > 0 ? [...selectedAssetNumbers] : undefined, // Asset numbers from script - source of truth for checkboxes - create new array copy
               isGenerating: existingScene?.isGenerating ?? false, // Preserve generating state
             };
           });
@@ -2569,7 +2645,7 @@ function SimpleCreateContent() {
         setPrompt(projectData.script);
       }
 
-      alert(`Successfully imported ${projectData.assets?.length || 0} assets, ${projectData.scenes?.length || 0} scenes, and music prompt!`);
+      console.log(`Successfully imported ${projectData.assets?.length || 0} assets, ${projectData.scenes?.length || 0} scenes, and music prompt!`);
     } catch (error: any) {
       console.error('Error importing project data:', error);
       alert(`Failed to import project data: ${error.message}`);
@@ -2620,6 +2696,7 @@ function SimpleCreateContent() {
       }
 
       const sceneAssetMap = structuredData.sceneAssetMap;
+      console.log('[Populate] sceneAssetMap from data:', sceneAssetMap);
       
       // Create a map from asset names to their position in the assets array (1-based)
       const assetNameToIndex = new Map<string, number>();
@@ -2628,21 +2705,46 @@ function SimpleCreateContent() {
           assetNameToIndex.set(asset.name, idx + 1); // 1-based asset number
         });
       }
+      console.log('[Populate] assetNameToIndex map:', Array.from(assetNameToIndex.entries()));
 
       // Update scenes with asset numbers from sceneAssetMap
       setScenes(currentScenes => {
-        return currentScenes.map((scene) => {
-          // Extract scene number from scene ID (e.g., "scene-1" -> 1)
-          const sceneNumMatch = scene.id.match(/scene-(\d+)/);
-          const sceneNumber = sceneNumMatch ? sceneNumMatch[1] : null;
+        console.log('[Populate] Current scenes:', currentScenes.map((s, idx) => ({ id: s.id, index: idx, selectedAssetNumbers: s.selectedAssetNumbers, selectedAssetIds: s.selectedAssetIds })));
+        console.log('[Populate] sceneAssetMap keys:', Object.keys(sceneAssetMap));
+        console.log('[Populate] sceneAssetMap:', sceneAssetMap);
+        
+        return currentScenes.map((scene, sceneIndex) => {
+          // Use sceneIndex + 1 as the scene number (1-based) to match sceneAssetMap keys
+          // sceneIndex is 0-based: scene 0 -> scene number 1, scene 1 -> scene number 2, etc.
+          const sceneNumber = String(sceneIndex + 1);
           
-          if (!sceneNumber || !sceneAssetMap[sceneNumber]) {
-            return scene; // No mapping for this scene, keep as is
+          console.log(`[Populate] Scene ID: ${scene.id}, sceneIndex: ${sceneIndex}, sceneNumber: ${sceneNumber}, available in map: ${sceneAssetMap[sceneNumber] ? 'YES' : 'NO'}`);
+          
+          // Check if this scene has a mapping in sceneAssetMap
+          if (!sceneAssetMap[sceneNumber]) {
+            console.log(`[Populate] Scene ${scene.id} (number ${sceneNumber}): No mapping found in sceneAssetMap, clearing selections`);
+            // Clear selections if no mapping found (don't keep old selections)
+            return {
+              ...scene,
+              selectedAssetNumbers: undefined,
+              selectedAssetIds: [],
+            };
           }
 
           // Get asset numbers for this scene from sceneAssetMap
+          // CRITICAL: Create a new array for each scene to avoid reference issues
           const sceneAssets = sceneAssetMap[sceneNumber];
-          const selectedAssetNumbers = sceneAssets
+          if (!Array.isArray(sceneAssets)) {
+            console.warn(`[Populate] Scene ${sceneNumber}: sceneAssetMap[${sceneNumber}] is not an array:`, sceneAssets);
+            return {
+              ...scene,
+              selectedAssetNumbers: undefined,
+              selectedAssetIds: [],
+            };
+          }
+          
+          // Create a fresh array for this scene's asset numbers
+          const selectedAssetNumbers: number[] = sceneAssets
             .map((item: string | number): number | undefined => {
               // If it's already a number, use it directly (1-based)
               if (typeof item === 'number') {
@@ -2652,27 +2754,41 @@ function SimpleCreateContent() {
               return assetNameToIndex.get(item);
             })
             .filter((num: number | undefined): num is number => num !== undefined && num !== null);
+          
+          console.log(`[Populate] Scene ${sceneNumber}: sceneAssets from map:`, sceneAssets, '-> converted to numbers:', selectedAssetNumbers);
 
-          // Convert asset numbers to asset IDs if assets already exist
-          let selectedAssetIds = scene.selectedAssetIds || [];
-          if (selectedAssetNumbers.length > 0 && generatedAnchorImages.length > 0) {
-            selectedAssetIds = selectedAssetNumbers
-              .map((assetNum: number): string | null => {
-                const matchingAsset = generatedAnchorImages.find(img => img.assetNumber === assetNum);
-                return matchingAsset ? matchingAsset.id : null;
-              })
-              .filter((id: string | null): id is string => id !== null);
+          // CRITICAL: Always clear old selectedAssetIds and convert asset numbers to IDs
+          // This ensures API calls use the populated selection, not old selections
+          let selectedAssetIds: string[] = [];
+          if (selectedAssetNumbers.length > 0) {
+            if (generatedAnchorImages.length > 0) {
+              // Assets exist - convert numbers to IDs immediately for API calls
+              selectedAssetIds = selectedAssetNumbers
+                .map((assetNum: number): string | null => {
+                  const matchingAsset = generatedAnchorImages.find(img => img.assetNumber === assetNum);
+                  return matchingAsset ? matchingAsset.id : null;
+                })
+                .filter((id: string | null): id is string => id !== null);
+            } else {
+              // Assets don't exist yet - selectedAssetIds will be empty
+              // selectedAssetNumbers will be used for checkbox checking
+              // When assets are generated, they'll be converted via useEffect
+              selectedAssetIds = [];
+            }
           }
 
+          console.log(`[Populate] Scene ${sceneNumber}: CLEARED old selections. New assetNumbers=[${selectedAssetNumbers.join(', ')}], new assetIds=[${selectedAssetIds.join(', ')}], oldIds=[${scene.selectedAssetIds.join(', ')}]`);
+
+          // CRITICAL: Create new arrays to avoid reference sharing between scenes
           return {
             ...scene,
-            selectedAssetNumbers: selectedAssetNumbers.length > 0 ? selectedAssetNumbers : undefined,
-            selectedAssetIds: selectedAssetIds.length > 0 ? selectedAssetIds : scene.selectedAssetIds,
+            selectedAssetNumbers: selectedAssetNumbers.length > 0 ? [...selectedAssetNumbers] : undefined, // New array copy
+            selectedAssetIds: [...selectedAssetIds], // New array copy - always cleared and populated from sceneAssetMap
           };
         });
       });
 
-      alert(`Successfully populated asset checkboxes for ${Object.keys(sceneAssetMap).length} scenes based on scene asset mapping!`);
+      console.log(`Successfully populated asset checkboxes for ${Object.keys(sceneAssetMap).length} scenes based on scene asset mapping!`);
     } catch (error: any) {
       console.error('Error populating scenes:', error);
       alert(`Failed to populate scenes: ${error.message}`);
@@ -2688,7 +2804,10 @@ function SimpleCreateContent() {
       let hasChanges = false;
       const updatedScenes = currentScenes.map(scene => {
         const hasPlaceholders = scene.selectedAssetIds.some(id => id.startsWith('slot-'));
-        if (!hasPlaceholders) return scene; // No placeholders to convert
+        const hasAssetNumbers = scene.selectedAssetNumbers && scene.selectedAssetNumbers.length > 0;
+        
+        // Only process if we have placeholders to convert OR selectedAssetNumbers to convert
+        if (!hasPlaceholders && !hasAssetNumbers) return scene;
         
         hasChanges = true;
         const updatedSelectedIds = scene.selectedAssetIds
@@ -2727,6 +2846,8 @@ function SimpleCreateContent() {
         }
         
         // Also convert selectedAssetNumbers to actual IDs if they exist
+        // CRITICAL: If selectedAssetNumbers exists, use it as the source of truth (from populate/import)
+        // Don't merge with old selectedAssetIds - clear and replace to ensure API calls use populated selection
         let finalSelectedIds = updatedSelectedIds;
         if (scene.selectedAssetNumbers && scene.selectedAssetNumbers.length > 0) {
           const assetIdsFromNumbers = scene.selectedAssetNumbers
@@ -2736,18 +2857,20 @@ function SimpleCreateContent() {
             })
             .filter((id): id is string => id !== null);
           
-          // Merge with existing IDs, avoiding duplicates
-          assetIdsFromNumbers.forEach(assetId => {
-            if (!finalSelectedIds.includes(assetId)) {
-              finalSelectedIds.push(assetId);
-            }
-          });
+          // If we have selectedAssetNumbers, they are the source of truth - replace selectedAssetIds
+          // This ensures API calls use the populated selection, not old selections
+          if (assetIdsFromNumbers.length > 0) {
+            finalSelectedIds = assetIdsFromNumbers;
+            console.log(`[Asset Conversion] Scene ${scene.id}: Converted selectedAssetNumbers ${scene.selectedAssetNumbers} to assetIds ${assetIdsFromNumbers}`);
+          }
         }
         
         return {
           ...scene,
           selectedAssetIds: finalSelectedIds,
-          selectedAssetNumbers: undefined, // Clear asset numbers once we have actual IDs
+          // Keep selectedAssetNumbers for checkbox checking even after conversion
+          // They serve as fallback if selectedAssetIds is empty
+          selectedAssetNumbers: scene.selectedAssetNumbers,
         };
       });
       

@@ -83,9 +83,6 @@ function formatProjectDataAsText(data: any): string {
     if (data.music.prompt) {
       formatted += `Style: ${data.music.prompt}\n`;
     }
-    if (data.music.duration) {
-      formatted += `Duration: ${data.music.duration} seconds\n`;
-    }
     if (data.music.lyrics) {
       formatted += `Lyrics/Description: ${data.music.lyrics}\n`;
     }
@@ -215,19 +212,22 @@ export function AIChatPanel({ projectId, projectContext, onApplyPrompt, onImport
       }
     }
 
-    // Restore input message if available
+    // Always clear input from sessionStorage - input should be empty on refresh or import
+    // The conversation messages are restored, but the input field should start fresh
     if (quickCreateInput) {
-      setInputMessage(quickCreateInput);
+      sessionStorage.removeItem('quickCreateInput');
     }
+    
+    // Ensure input is empty (don't restore it)
+    setInputMessage('');
 
     // Restore conversation ID if available
     if (quickCreateConversationId) {
       setConversationId(quickCreateConversationId);
     }
 
-    // Clear the sessionStorage after restoring (optional - you might want to keep it)
+    // Keep conversation in sessionStorage for continuity, but clear input after initial restore
     // sessionStorage.removeItem('quickCreateConversation');
-    // sessionStorage.removeItem('quickCreateInput');
     // sessionStorage.removeItem('quickCreateConversationId');
   }, []); // Run once on mount
 

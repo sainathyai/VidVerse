@@ -22,6 +22,10 @@ export interface FrameExtractionResult {
   lastFrameUrl: string;
 }
 
+export interface ThumbnailResult {
+  thumbnailUrl: string;
+}
+
 /**
  * Extract first and last frames from a video
  */
@@ -237,26 +241,133 @@ export async function concatenateVideos(
   }
 
   // Create concat list file
-  const listContent = localPaths.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n');
+  // Use absolute paths with forward slashes for cross-platform compatibility
+  const listContent = localPaths.map(p => {
+    const normalizedPath = path.resolve(p).replace(/\\/g, '/');
+    return `file '${normalizedPath}'`;
+  }).join('\n');
   await fs.writeFile(listFile, listContent);
 
+  // Log the list file content for debugging (first 500 chars)
+  console.log(`[VIDEO_PROCESSOR] Concat list file content (first 500 chars): ${listContent.substring(0, 500)}`);
+  console.log(`[VIDEO_PROCESSOR] FFmpeg path: ${config.ffmpeg.path}, FFprobe path: ${config.ffmpeg.ffprobePath}`);
+  console.log(`[VIDEO_PROCESSOR] Output path: ${outputPath}, Temp dir: ${tempDir}`);
+
   return new Promise((resolve, reject) => {
-    ffmpeg()
+    const ffmpegCommand = ffmpeg()
       .input(listFile)
       .inputOptions(['-f', 'concat', '-safe', '0'])
       .outputOptions(['-c', 'copy']) // Copy codec (no re-encoding for speed)
-      .output(outputPath)
+      .output(outputPath);
+
+    // Add stderr logging to capture ffmpeg output
+    let stderrOutput = '';
+    ffmpegCommand.on('stderr', (stderrLine) => {
+      stderrOutput += stderrLine + '\n';
+      console.log(`[VIDEO_PROCESSOR] FFmpeg stderr: ${stderrLine}`);
+    });
+
+    ffmpegCommand
       .on('end', async () => {
+        console.log(`[VIDEO_PROCESSOR] Video concatenation completed successfully`);
         // Cleanup
         await fs.rm(tempDir, { recursive: true, force: true });
         resolve();
       })
-      .on('error', async (err) => {
-        await fs.rm(tempDir, { recursive: true, force: true });
-        reject(err);
+      .on('error', async (err: Error) => {
+        const errorMessage = err.message || 'Unknown error';
+        const fullError = `FFmpeg concatenation failed: ${errorMessage}\nFFmpeg stderr output:\n${stderrOutput}\nFFmpeg path: ${config.ffmpeg.path}\nFFprobe path: ${config.ffmpeg.ffprobePath}`;
+        console.error(`[VIDEO_PROCESSOR] ${fullError}`);
+        
+        // Check for common errors
+        if (errorMessage.includes('Cannot find ffmpeg') || errorMessage.includes('ffmpeg: not found')) {
+          reject(new Error(`FFmpeg not found at ${config.ffmpeg.path}. Please ensure FFmpeg is installed and FFMPEG_PATH is set correctly. In Alpine Linux containers, FFmpeg should be at /usr/bin/ffmpeg.`));
+        } else if (errorMessage.includes('Invalid data found') || errorMessage.includes('concat')) {
+          reject(new Error(`FFmpeg concat error: ${errorMessage}. This may indicate an issue with the video files or the concat list format.`));
+        } else {
+          reject(new Error(fullError));
+        }
+        
+        // Cleanup on error
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
       })
       .run();
   });
+}
+
+/**
+ * Extract thumbnail (first frame) from a video file
+ * This is used for generating project thumbnails from final stitched videos
+ */
+export async function extractThumbnail(
+  videoPath: string,
+  userId: string,
+  projectId: string
+): Promise<ThumbnailResult> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vidverse-thumbnail-'));
+  const thumbnailPath = path.join(tempDir, 'thumbnail.jpg');
+
+  try {
+    // Check if ffprobe is available
+    if (!config.ffmpeg.ffprobePath || config.ffmpeg.ffprobePath === 'ffprobe') {
+      console.warn('[VIDEO_PROCESSOR] FFprobe path not configured. Thumbnail extraction may fail.');
+    }
+
+    return new Promise((resolve, reject) => {
+      // Extract first frame at 0.5 seconds to avoid black frames
+      ffmpeg(videoPath)
+        .screenshots({
+          timestamps: [0.5],
+          filename: 'thumbnail.jpg',
+          folder: tempDir,
+          size: '1920x1080',
+        })
+        .on('end', async () => {
+          try {
+            // Verify thumbnail file exists
+            await fs.access(thumbnailPath);
+            console.log(`[VIDEO_PROCESSOR] Thumbnail extracted successfully`);
+
+            // Read thumbnail buffer
+            const thumbnailBuffer = await fs.readFile(thumbnailPath);
+
+            // Validate buffer is not empty
+            if (!thumbnailBuffer || thumbnailBuffer.length === 0) {
+              throw new Error('Thumbnail buffer is empty');
+            }
+
+            // Upload thumbnail to S3
+            const { uploadFile } = await import('./storage');
+            const thumbnailResult = await uploadFile(
+              thumbnailBuffer,
+              userId,
+              'image',
+              'image/jpeg',
+              projectId,
+              'thumbnail.jpg'
+            );
+
+            // Cleanup temp files
+            await fs.rm(tempDir, { recursive: true, force: true });
+
+            resolve({
+              thumbnailUrl: thumbnailResult.url,
+            });
+          } catch (error: any) {
+            await fs.rm(tempDir, { recursive: true, force: true });
+            reject(new Error(`Failed to process thumbnail: ${error.message}`));
+          }
+        })
+        .on('error', async (err) => {
+          await fs.rm(tempDir, { recursive: true, force: true });
+          reject(new Error(`Failed to extract thumbnail: ${err.message}`));
+        });
+    });
+  } catch (error: any) {
+    // Cleanup on any error
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    throw new Error(`Failed to extract thumbnail: ${error.message}`);
+  }
 }
 
 /**
