@@ -2232,6 +2232,18 @@ function SimpleCreateContent() {
     setScenes(prev => prev.filter(s => s.id !== sceneId));
   }, []);
 
+  const [generationProgress, setGenerationProgress] = useState<{
+    progress: number;
+    currentStage: string;
+    jobId: string | null;
+    cost: number | null;
+  }>({
+    progress: 0,
+    currentStage: '',
+    jobId: null,
+    cost: null,
+  });
+
   const handleGenerateAll = useCallback(async (forceParallel: boolean = false) => {
     // Validate all scenes have prompts
     const scenesWithoutPrompts = scenes.filter(s => !s.prompt.trim());
@@ -2241,6 +2253,9 @@ function SimpleCreateContent() {
     }
 
     setIsGeneratingAll(true);
+    setGenerationProgress({ progress: 0, currentStage: 'Initializing...', jobId: null, cost: null });
+    
+    let pollInterval: NodeJS.Timeout | null = null;
     
     try {
       const token = await getAccessToken();
@@ -2262,11 +2277,51 @@ function SimpleCreateContent() {
       // Use forceParallel if provided, otherwise use the parallel checkbox state
       const useParallel = forceParallel || parallel;
 
+      // Start polling for progress (will start after jobId is received)
+      const startPolling = (jobId: string) => {
+        if (pollInterval) clearInterval(pollInterval);
+        
+        pollInterval = setInterval(async () => {
+          try {
+            const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
+            const apiUrl = import.meta.env.VITE_API_URL || (isDev ? 'http://localhost:3001' : 'https://api.vidverseai.com');
+            const response = await fetch(`${apiUrl}/api/jobs/${jobId}`, {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            });
+
+            if (response.ok) {
+              const jobStatus = await response.json();
+              setGenerationProgress(prev => ({
+                ...prev,
+                progress: jobStatus.progress || 0,
+                currentStage: jobStatus.current_stage || '',
+                cost: jobStatus.cost_usd || null,
+              }));
+
+              // Stop polling if job is complete or failed
+              if (jobStatus.status === 'completed' || jobStatus.status === 'failed') {
+                if (pollInterval) {
+                  clearInterval(pollInterval);
+                  pollInterval = null;
+                }
+              }
+            }
+          } catch (pollError) {
+            console.error('Error polling job status:', pollError);
+          }
+        }, 2000); // Poll every 2 seconds
+      };
+
       // Call backend endpoint to generate all scenes
       const result = await apiRequest<{
+        jobId?: string;
         finalVideoUrl: string;
         sceneUrls: string[];
         frameUrls: Array<{ first: string; last: string }>;
+        cost?: number;
+        totalDuration?: number;
       }>(
         `/api/projects/${projectId}/scenes/generate-all`,
         {
@@ -2302,6 +2357,12 @@ function SimpleCreateContent() {
         token
       );
 
+      // Start polling if jobId is returned
+      if (result.jobId) {
+        setGenerationProgress(prev => ({ ...prev, jobId: result.jobId || null }));
+        startPolling(result.jobId);
+      }
+
       // Update all scenes with generated videos
       setScenes(prev => prev.map((scene, index) => ({
         ...scene,
@@ -2316,16 +2377,47 @@ function SimpleCreateContent() {
         setFinalVideoUrl(result.finalVideoUrl);
       }
 
+      // Update cost if provided
+      if (result.cost !== undefined) {
+        setGenerationProgress(prev => ({ ...prev, cost: result.cost || null, progress: 100 }));
+      }
+
       // Show success message
       console.log('All scenes generated successfully! Final stitched video:', result.finalVideoUrl);
+      if (result.cost !== undefined) {
+        console.log(`Generation cost: $${result.cost.toFixed(2)}`);
+      }
     } catch (error: any) {
       console.error('Error generating all scenes:', error);
-      alert(`Failed to generate all scenes: ${error.message || 'Unknown error'}`);
+      
+      // Better error handling
+      let errorMessage = 'Unknown error occurred';
+      if (error.message) {
+        errorMessage = error.message;
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      } else if (error.response?.data?.message) {
+        errorMessage = error.response.data.message;
+      } else if (error.response?.data?.error) {
+        errorMessage = error.response.data.error;
+      }
+      
+      alert(`Failed to generate all scenes: ${errorMessage}`);
       
       // Set all scenes as not generating on error
       setScenes(prev => prev.map(s => ({ ...s, isGenerating: false })));
+      
+      // Update progress to show error
+      setGenerationProgress(prev => ({ ...prev, progress: 0, currentStage: 'Error occurred' }));
     } finally {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
       setIsGeneratingAll(false);
+      // Reset progress after a delay to allow user to see final state
+      setTimeout(() => {
+        setGenerationProgress({ progress: 0, currentStage: '', jobId: null, cost: null });
+      }, 5000);
     }
   }, [scenes, parallel, continuous, useReferenceFrame, videoModelId, aspectRatio, style, mood, colorPalette, pacing, generatedAnchorImages, getAccessToken, ensureProjectExists, includeAudio]);
 
@@ -3009,6 +3101,7 @@ function SimpleCreateContent() {
           onGenerateAllParallel={async () => await handleGenerateAll(true)}
           onStitchScenes={handleStitchScenes}
           isStitching={isStitching}
+          generationProgress={generationProgress}
           onReorderAssets={handleReorderAssets}
           musicPrompt={musicPrompt}
           onMusicPromptChange={setMusicPrompt}

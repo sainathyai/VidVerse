@@ -2282,6 +2282,12 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
     const { id: projectId } = request.params;
     const requestBody = request.body;
 
+    // Create job record for progress tracking
+    const { query: queryDb } = await import('../services/database');
+    let jobId: string | null = null;
+    const COST_PER_SECOND = 0.22; // $0.22 per second of video generation
+    let totalVideoDuration = 0; // Track total duration for cost calculation
+
     try {
       // Verify project belongs to user
       const project = await queryOne(
@@ -2293,6 +2299,15 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         return reply.code(404).send({ error: 'Project not found' });
       }
 
+      // Create job record
+      const jobResult = await queryDb(
+        `INSERT INTO jobs (project_id, type, status, progress, current_stage, started_at)
+         VALUES ($1, 'full_generation', 'processing', 0, 'Initializing...', NOW())
+         RETURNING id`,
+        [projectId]
+      );
+      jobId = jobResult[0]?.id || null;
+
       const config = typeof project.config === 'string' 
         ? JSON.parse(project.config) 
         : (project.config || {});
@@ -2301,11 +2316,18 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       const { extractFrames } = await import('../services/videoProcessor');
       const { uploadGeneratedVideo } = await import('../services/storage');
       const { concatenateVideos } = await import('../services/videoProcessor');
-      const { query: queryDb } = await import('../services/database');
 
       const selectedVideoModelId = requestBody.videoModelId || config.videoModelId || 'google/veo-3.1';
       const isVeo31 = selectedVideoModelId.startsWith('google/veo-3.1');
       const aspectRatio = '16:9';
+
+      // Update progress: Starting generation
+      if (jobId) {
+        await queryDb(
+          'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+          [5, 'Preparing scenes...', jobId]
+        );
+      }
 
       // Generate all scenes
       const sceneResults: Array<{ videoUrl: string; firstFrameUrl?: string; lastFrameUrl?: string }> = [];
@@ -2314,6 +2336,14 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
       if (requestBody.parallel) {
         // Parallel generation - all at once
         fastify.log.info({ projectId, sceneCount: requestBody.scenes.length }, 'Generating all scenes in parallel');
+        
+        // Update progress: Starting parallel generation
+        if (jobId) {
+          await queryDb(
+            'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+            [10, `Generating ${requestBody.scenes.length} scenes in parallel...`, jobId]
+          );
+        }
         
         const generationPromises = requestBody.scenes.map(async (sceneData, i) => {
           const sceneIndex = sceneData.sceneIndex; // Now 1-based (1, 2, 3, 4, 5)
@@ -2399,6 +2429,10 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             throw new Error(`Scene ${sceneNumber} generation failed: ${result.error}`);
           }
 
+          // Track video duration for cost calculation (default 8 seconds per scene)
+          const sceneDuration = 8;
+          totalVideoDuration += sceneDuration;
+
           let videoUrl: string;
           if (Array.isArray(result.output)) {
             videoUrl = result.output[0];
@@ -2406,6 +2440,15 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             videoUrl = result.output;
           } else {
             throw new Error(`Unexpected output format from Replicate: ${typeof result.output}`);
+          }
+          
+          // Update progress: Scene completed
+          if (jobId) {
+            const progressPercent = 10 + Math.floor((i + 1) / requestBody.scenes.length * 60); // 10-70%
+            await queryDb(
+              'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+              [progressPercent, `Scene ${sceneNumber}/${requestBody.scenes.length} completed`, jobId]
+            );
           }
 
           // Download and upload to S3
@@ -2541,9 +2584,25 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             failedScenes: failedScenes.map(f => ({ sceneNumber: f.sceneNumber, sceneIndex: f.sceneIndex, error: f.error }))
           }, `${failedScenes.length} scene(s) failed (scenes: ${failedSceneNumbers.join(', ')}), but ${successfulScenes.length} succeeded (scenes: ${successfulSceneNumbers.join(', ')})`);
         }
+        
+        // Update progress: Parallel generation complete
+        if (jobId) {
+          await queryDb(
+            'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+            [70, 'All scenes generated, stitching videos...', jobId]
+          );
+        }
       } else {
         // Sequential generation - one after another
         fastify.log.info({ projectId, sceneCount: requestBody.scenes.length }, 'Generating all scenes sequentially');
+        
+        // Update progress: Starting sequential generation
+        if (jobId) {
+          await queryDb(
+            'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+            [10, `Generating ${requestBody.scenes.length} scenes sequentially...`, jobId]
+          );
+        }
         
         for (let i = 0; i < requestBody.scenes.length; i++) {
           const sceneData = requestBody.scenes[i];
@@ -2641,21 +2700,34 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
           }
 
           try {
-            const result = await generateVideo(videoGenOptions);
-            if (result.status === 'failed') {
-              throw new Error(`Scene ${sceneNumber} generation failed: ${result.error}`);
-            }
+          const result = await generateVideo(videoGenOptions);
+          if (result.status === 'failed') {
+            throw new Error(`Scene ${sceneNumber} generation failed: ${result.error}`);
+          }
 
-            let videoUrl: string;
-            if (Array.isArray(result.output)) {
-              videoUrl = result.output[0];
-            } else if (typeof result.output === 'string') {
-              videoUrl = result.output;
-            } else {
-              throw new Error(`Unexpected output format from Replicate: ${typeof result.output}`);
-            }
+          // Track video duration for cost calculation (default 8 seconds per scene)
+          const sceneDuration = 8;
+          totalVideoDuration += sceneDuration;
+          
+          // Update progress: Scene in progress
+          if (jobId) {
+            const progressPercent = 10 + Math.floor((i + 1) / requestBody.scenes.length * 60); // 10-70%
+            await queryDb(
+              'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+              [progressPercent, `Generating scene ${sceneNumber}/${requestBody.scenes.length}...`, jobId]
+            );
+          }
 
-            // Download and upload to S3
+          let videoUrl: string;
+          if (Array.isArray(result.output)) {
+            videoUrl = result.output[0];
+          } else if (typeof result.output === 'string') {
+            videoUrl = result.output;
+          } else {
+            throw new Error(`Unexpected output format from Replicate: ${typeof result.output}`);
+          }
+
+          // Download and upload to S3
             const videoResponse = await fetch(videoUrl);
             const videoBuffer = Buffer.from(await videoResponse.arrayBuffer());
             const uploadResult = await uploadGeneratedVideo(
@@ -2742,10 +2814,26 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             // The error will be reported in the final response
           }
         }
+        
+        // Update progress: Sequential generation complete
+        if (jobId) {
+          await queryDb(
+            'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+            [70, 'All scenes generated, stitching videos...', jobId]
+          );
+        }
       }
 
       // Stitch all videos together
       let finalVideoUrl: string | null = null;
+      
+      // Update progress: Starting stitching
+      if (jobId) {
+        await queryDb(
+          'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+          [75, 'Stitching scenes together...', jobId]
+        );
+      }
       
       if (sceneResults.length > 0 && sceneResults.every(r => r.videoUrl)) {
         try {
@@ -2772,15 +2860,46 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
             // Cleanup temp directory
             await fs.rm(tempDir, { recursive: true, force: true });
             fastify.log.info({ projectId, finalVideoUrl: finalVideoUrl }, 'Final stitched video uploaded successfully');
+            
+            // Update progress: Stitching complete
+            if (jobId) {
+              await queryDb(
+                'UPDATE jobs SET progress = $1, current_stage = $2 WHERE id = $3',
+                [90, 'Finalizing...', jobId]
+              );
+            }
           } else {
             fastify.log.warn({ projectId }, 'No valid scene video URLs to stitch');
           }
         } catch (stitchError: any) {
           fastify.log.error({ projectId, error: stitchError.message, stack: stitchError.stack }, 'Failed to stitch videos, but scenes were generated successfully');
           // Don't fail the entire request - scenes were generated, stitching just failed
+          
+          // Update job with error
+          if (jobId) {
+            await queryDb(
+              'UPDATE jobs SET progress = $1, current_stage = $2, error = $3 WHERE id = $4',
+              [90, 'Stitching failed', stitchError.message, jobId]
+            );
+          }
         }
       } else {
         fastify.log.warn({ projectId, sceneResultsCount: sceneResults.length }, 'No scene results to stitch');
+      }
+      
+      // Calculate and store cost
+      const totalCost = totalVideoDuration * COST_PER_SECOND;
+      if (jobId) {
+        await queryDb(
+          'UPDATE jobs SET cost_usd = $1, result = $2 WHERE id = $3',
+          [totalCost, JSON.stringify({ 
+            costBreakdown: {
+              totalDuration: totalVideoDuration,
+              costPerSecond: COST_PER_SECOND,
+              totalCost: totalCost
+            }
+          }), jobId]
+        );
       }
 
       // Save final video URL to database and config, and mark project as completed (if stitching succeeded)
@@ -2841,16 +2960,41 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
         }, 'Final video generated, uploaded to S3, saved to database, and project marked as completed');
       }
 
+      // Update job as completed
+      if (jobId) {
+        await queryDb(
+          'UPDATE jobs SET status = $1, progress = $2, current_stage = $3, completed_at = NOW() WHERE id = $4',
+          ['completed', 100, 'Complete', jobId]
+        );
+      }
+
       return {
+        jobId: jobId,
         finalVideoUrl: finalVideoUrl || null,
         sceneUrls: sceneResults.map(r => r.videoUrl),
         frameUrls: sceneResults.map(r => ({ first: r.firstFrameUrl || '', last: r.lastFrameUrl || '' })),
+        cost: totalCost,
+        totalDuration: totalVideoDuration,
       };
     } catch (error: any) {
-      fastify.log.error({ projectId, error: error.message }, 'Failed to generate all scenes');
+      fastify.log.error({ projectId, error: error.message, stack: error.stack }, 'Failed to generate all scenes');
+      
+      // Update job with error
+      if (jobId) {
+        try {
+          await queryDb(
+            'UPDATE jobs SET status = $1, progress = $2, error = $3, error_details = $4 WHERE id = $5',
+            ['failed', 0, error.message, JSON.stringify({ error: error.message, stack: error.stack }), jobId]
+          );
+        } catch (jobError: any) {
+          fastify.log.error({ jobId, error: jobError.message }, 'Failed to update job with error');
+        }
+      }
+      
       return reply.code(500).send({ 
         error: 'Generate all scenes failed',
-        message: error.message 
+        message: error.message,
+        jobId: jobId,
       });
     }
   });
@@ -3524,7 +3668,11 @@ Generate a high-quality reference image that shows the "${element}" element. Thi
           
           // Removed verbose per-project logging
           
-          return project;
+          // Add cost to project (from total_cost calculated in SQL query)
+          return {
+            ...project,
+            cost: parseFloat(project.total_cost || '0') || 0,
+          };
         })
       );
 

@@ -52,11 +52,11 @@ export async function jobRoutes(fastify: FastifyInstance, options: FastifyPlugin
     return reply.code(307).redirect(`/api/projects/${projectId}/generate-sync`);
   });
 
-  // Get job status - deprecated, use project status instead
+  // Get job status
   fastify.get('/jobs/:jobId', {
     preHandler: [authenticateCognito],
     schema: {
-      description: 'Get job status (deprecated - use project status instead)',
+      description: 'Get job status with progress',
       tags: ['jobs'],
       params: {
         type: 'object',
@@ -66,11 +66,38 @@ export async function jobRoutes(fastify: FastifyInstance, options: FastifyPlugin
       },
     },
   }, async (request: FastifyRequest<{ Params: { jobId: string } }>, reply: FastifyReply) => {
-    // Job queue is disabled - return not found
-    return reply.code(404).send({ 
-      error: 'Job not found',
-      message: 'Job queue is disabled. Check project status directly from /api/projects/:id',
-    });
+    const user = getCognitoUser(request);
+    const { jobId } = request.params;
+
+    // Get job from database
+    const { query } = await import('../services/database');
+    const jobs = await query(
+      `SELECT j.*, p.user_id 
+       FROM jobs j
+       JOIN projects p ON j.project_id = p.id
+       WHERE j.id = $1 AND p.user_id = $2`,
+      [jobId, user.sub]
+    );
+
+    if (!jobs || jobs.length === 0) {
+      return reply.code(404).send({ 
+        error: 'Job not found',
+      });
+    }
+
+    const job = jobs[0];
+    return {
+      id: job.id,
+      status: job.status,
+      progress: job.progress || 0,
+      current_stage: job.current_stage || '',
+      cost_usd: job.cost_usd || 0,
+      result: job.result,
+      error: job.error,
+      error_details: job.error_details,
+      createdAt: job.created_at,
+      completedAt: job.completed_at,
+    };
   });
 
   // Get jobs for a project

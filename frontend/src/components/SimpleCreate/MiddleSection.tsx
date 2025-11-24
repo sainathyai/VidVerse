@@ -64,6 +64,12 @@ interface MiddleSectionProps {
   onGenerateAllParallel: () => Promise<void>;
   onStitchScenes: () => Promise<void>;
   isStitching: boolean;
+  generationProgress?: {
+    progress: number;
+    currentStage: string;
+    jobId: string | null;
+    cost: number | null;
+  };
   onReorderAssets: (fromIndex: number, toIndex: number) => void;
   musicPrompt: string;
   onMusicPromptChange: (prompt: string) => void;
@@ -115,6 +121,7 @@ export function MiddleSection({
   onGenerateAllParallel,
   onStitchScenes,
   isStitching,
+  generationProgress,
   onReorderAssets,
   musicPrompt,
   onMusicPromptChange,
@@ -906,6 +913,33 @@ export function MiddleSection({
               </div>
             </div>
           </div>
+
+          {/* Progress Bar */}
+          {isGeneratingAll && generationProgress && generationProgress.progress > 0 && (
+            <div className="pt-4 pb-2">
+              <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-white/80 font-medium">
+                    {generationProgress.currentStage || 'Generating...'}
+                  </span>
+                  <span className="text-sm text-white/60">
+                    {generationProgress.progress}%
+                  </span>
+                </div>
+                <div className="w-full bg-white/10 rounded-full h-2.5 overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-blue-500 to-purple-500 transition-all duration-300 ease-out"
+                    style={{ width: `${generationProgress.progress}%` }}
+                  />
+                </div>
+                {generationProgress.cost !== null && (
+                  <div className="mt-2 text-xs text-white/60">
+                    Estimated cost: ${generationProgress.cost.toFixed(2)}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Generate All Scenes Buttons */}
           {scenes.length > 0 && (
