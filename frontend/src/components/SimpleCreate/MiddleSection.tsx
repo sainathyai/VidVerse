@@ -1,5 +1,5 @@
 import React from "react";
-import { Pencil, Check, X, Image as ImageIcon, Loader2, Plus, Play, Video as VideoIcon, Music, Upload } from "lucide-react";
+import { Pencil, Check, X, Image as ImageIcon, Loader2, Plus, Play, Video as VideoIcon, Music, Upload, FileText } from "lucide-react";
 import { useAuth } from "../auth/AuthProvider";
 
 const MAX_ANCHOR_ASSETS = 5;
@@ -72,6 +72,7 @@ interface MiddleSectionProps {
   onGenerateMusic: () => Promise<void>;
   finalVideoUrl: string | null;
   onUploadAsset?: (assetIndex: number, file: File) => Promise<void>;
+  onPopulateScenes?: () => void;
 }
 
 export function MiddleSection({
@@ -122,6 +123,7 @@ export function MiddleSection({
   onGenerateMusic,
   finalVideoUrl,
   onUploadAsset,
+  onPopulateScenes,
 }: MiddleSectionProps) {
   const [draggedIndex, setDraggedIndex] = React.useState<number | null>(null);
   const { getAccessToken } = useAuth();
@@ -623,7 +625,19 @@ export function MiddleSection({
                   
                   {/* Generate All Assets Button - Below asset tiles row */}
                   {anchorImagePrompts.length > 0 && (
-                    <div className="pt-3 flex justify-end">
+                    <div className="pt-3 flex justify-end gap-2">
+                      {onPopulateScenes && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onPopulateScenes();
+                          }}
+                          className="w-auto px-6 bg-gradient-to-r from-green-500/90 to-emerald-500/90 text-white py-1.5 rounded-lg font-medium text-sm backdrop-blur-md border border-white/20 shadow-lg shadow-green-500/30 hover:shadow-xl hover:shadow-green-500/50 hover:scale-[1.03] hover:from-green-500 hover:to-emerald-500 transition-all duration-300 flex items-center justify-center gap-2"
+                        >
+                          <FileText className="w-4 h-4" />
+                          Populate Scenes
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={async () => {
@@ -738,11 +752,14 @@ export function MiddleSection({
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium text-white/70">Assets:</span>
                         {generatedAnchorImages.map((asset) => {
-                          const isSelected = scene.selectedAssetIds.includes(asset.id);
+                          // Check if selected by ID (for generated assets) or by asset number (for imported projects before assets are generated)
+                          const isSelectedById = scene.selectedAssetIds.includes(asset.id);
+                          const isSelectedByNumber = scene.selectedAssetNumbers?.includes(asset.assetNumber) ?? false;
+                          const isSelected = isSelectedById || isSelectedByNumber;
                           
                           return (
                             <label
-                              key={asset.id}
+                              key={`${scene.id}-${asset.id}`}
                               className="flex items-center gap-1 text-white/70 cursor-pointer"
                             >
                               <input
@@ -750,7 +767,7 @@ export function MiddleSection({
                                 checked={isSelected}
                                 onChange={(e) => {
                                   const newSelectedIds = e.target.checked
-                                    ? [...scene.selectedAssetIds, asset.id]
+                                    ? [...scene.selectedAssetIds.filter(id => id !== asset.id), asset.id]
                                     : scene.selectedAssetIds.filter(id => id !== asset.id);
                                   onSceneSelectedAssetIdsChange(scene.id, newSelectedIds);
                                 }}

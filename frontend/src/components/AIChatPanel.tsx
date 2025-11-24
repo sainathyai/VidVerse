@@ -4,6 +4,97 @@ import { apiRequest } from '../lib/api';
 import { useAuth } from './auth/AuthProvider';
 import { extractProjectJSON, normalizeProjectData, validateProjectData } from '../lib/projectImport';
 
+/**
+ * Format structured project JSON data into readable plain text
+ */
+function formatProjectDataAsText(data: any): string {
+  if (!data) return '';
+  
+  let formatted = '';
+  
+  // Script
+  if (data.script) {
+    formatted += `📝 **SCRIPT**\n\n${data.script}\n\n`;
+  }
+  
+  // Global Style
+  if (data.globalStyle) {
+    formatted += `🎨 **VISUAL STYLE**\n`;
+    if (data.globalStyle.colorPalette) {
+      formatted += `Color Palette: ${data.globalStyle.colorPalette}\n`;
+    }
+    if (data.globalStyle.lighting) {
+      formatted += `Lighting: ${data.globalStyle.lighting}\n`;
+    }
+    if (data.globalStyle.cameraStyle) {
+      formatted += `Camera Style: ${data.globalStyle.cameraStyle}\n`;
+    }
+    if (data.globalStyle.visualAesthetic) {
+      formatted += `Visual Aesthetic: ${data.globalStyle.visualAesthetic}\n`;
+    }
+    formatted += '\n';
+  }
+  
+  // Assets
+  if (data.assets && data.assets.length > 0) {
+    formatted += `🖼️ **ASSETS** (${data.assets.length})\n\n`;
+    data.assets.forEach((asset: any, index: number) => {
+      formatted += `${index + 1}. ${asset.name || `Asset ${index + 1}`}\n`;
+      if (asset.category) {
+        formatted += `   Category: ${asset.category}\n`;
+      }
+      if (asset.prompt) {
+        formatted += `   Description: ${asset.prompt}\n`;
+      }
+      formatted += '\n';
+    });
+  }
+  
+  // Scenes
+  if (data.scenes && data.scenes.length > 0) {
+    formatted += `🎬 **SCENES** (${data.scenes.length})\n\n`;
+    data.scenes.forEach((scene: any) => {
+      formatted += `Scene ${scene.sceneNumber || '?'}\n`;
+      if (scene.prompt) {
+        formatted += `${scene.prompt}\n`;
+      }
+      if (scene.assetIds && scene.assetIds.length > 0) {
+        formatted += `Assets: ${scene.assetIds.join(', ')}\n`;
+      }
+      if (scene.transitionNotes) {
+        formatted += `Transition: ${scene.transitionNotes}\n`;
+      }
+      formatted += '\n';
+    });
+  }
+  
+  // Scene Asset Map
+  if (data.sceneAssetMap) {
+    formatted += `🔗 **SCENE-ASSET MAPPING**\n\n`;
+    Object.entries(data.sceneAssetMap).forEach(([sceneNum, assetNums]: [string, any]) => {
+      formatted += `Scene ${sceneNum}: Assets ${Array.isArray(assetNums) ? assetNums.join(', ') : assetNums}\n`;
+    });
+    formatted += '\n';
+  }
+  
+  // Music
+  if (data.music) {
+    formatted += `🎵 **MUSIC**\n\n`;
+    if (data.music.prompt) {
+      formatted += `Style: ${data.music.prompt}\n`;
+    }
+    if (data.music.duration) {
+      formatted += `Duration: ${data.music.duration} seconds\n`;
+    }
+    if (data.music.lyrics) {
+      formatted += `Lyrics/Description: ${data.music.lyrics}\n`;
+    }
+    formatted += '\n';
+  }
+  
+  return formatted.trim();
+}
+
 interface AIChatPanelProps {
   projectId?: string;
   projectContext?: {
@@ -64,6 +155,88 @@ export function AIChatPanel({ projectId, projectContext, onApplyPrompt, onImport
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { getAccessToken } = useAuth();
+
+  // Sync with QuickCreateModal - restore conversation from sessionStorage
+  useEffect(() => {
+    const quickCreateConversation = sessionStorage.getItem('quickCreateConversation');
+    const quickCreateInput = sessionStorage.getItem('quickCreateInput');
+    const quickCreateConversationId = sessionStorage.getItem('quickCreateConversationId');
+
+    if (quickCreateConversation) {
+      try {
+        const conversationData = JSON.parse(quickCreateConversation);
+        if (conversationData.messages && Array.isArray(conversationData.messages)) {
+          // Convert stored messages to ChatMessage format and detect import opportunities
+          const restoredMessages: ChatMessage[] = conversationData.messages.map((msg: any) => {
+            const chatMessage: ChatMessage = {
+              id: msg.id || `msg-${Date.now()}-${Math.random()}`,
+              role: msg.role,
+              content: msg.content,
+              timestamp: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+            };
+
+            // For assistant messages, check if they contain structured project data
+            if (msg.role === 'assistant' && msg.content) {
+              // Check if response contains structured content (code blocks, markdown, etc.)
+              const hasStructuredContent = /```|```[\w]*\n|#+\s|^\*\*|^\* /m.test(msg.content);
+              
+              // Check if assistant response contains final/ready keywords
+              const hasFinalKeywords = /(final|ready|here'?s (?:your|the)|complete|finished|done|generated|created|script|prompt|video description|here is|below is)/i.test(msg.content);
+              
+              // Try to extract project JSON from the response
+              let structuredProjectData: any = null;
+              try {
+                const extractedData = extractProjectJSON(msg.content);
+                if (extractedData && validateProjectData(extractedData)) {
+                  structuredProjectData = normalizeProjectData(extractedData);
+                }
+              } catch (error) {
+                // If extraction fails, that's okay - just won't have structured data
+              }
+
+              // Show import button if structured data exists or has indicators
+              if (structuredProjectData || hasStructuredContent || hasFinalKeywords) {
+                chatMessage.showImport = true;
+                if (structuredProjectData) {
+                  chatMessage.structuredData = structuredProjectData;
+                }
+              }
+            }
+
+            return chatMessage;
+          });
+          setMessages(restoredMessages);
+        }
+        if (conversationData.conversationId) {
+          setConversationId(conversationData.conversationId);
+        }
+      } catch (error) {
+        console.error('Error restoring conversation from QuickCreate:', error);
+      }
+    }
+
+    // Restore input message if available
+    if (quickCreateInput) {
+      setInputMessage(quickCreateInput);
+    }
+
+    // Restore conversation ID if available
+    if (quickCreateConversationId) {
+      setConversationId(quickCreateConversationId);
+    }
+
+    // Clear the sessionStorage after restoring (optional - you might want to keep it)
+    // sessionStorage.removeItem('quickCreateConversation');
+    // sessionStorage.removeItem('quickCreateInput');
+    // sessionStorage.removeItem('quickCreateConversationId');
+  }, []); // Run once on mount
+
+  // Sync input message changes back to sessionStorage (for real-time sync if both are open)
+  useEffect(() => {
+    if (inputMessage) {
+      sessionStorage.setItem('quickCreateInput', inputMessage);
+    }
+  }, [inputMessage]);
 
   const defaultPrompts: DefaultPrompt[] = [
     {
@@ -322,6 +495,24 @@ Ask me questions to better understand my vision, then provide creative recommend
       if (response.conversationId) {
         setConversationId(response.conversationId);
       }
+
+      // Sync conversation back to sessionStorage for QuickCreateModal
+      const updatedMessages = [...messages, userMessage, assistantMessage];
+      const conversationData = {
+        messages: updatedMessages.map(msg => ({
+          id: msg.id,
+          role: msg.role,
+          content: msg.content,
+          timestamp: msg.timestamp.toISOString(),
+        })),
+        conversationId: response.conversationId || conversationId,
+        inputMessage: inputMessage.trim(),
+      };
+      sessionStorage.setItem('quickCreateConversation', JSON.stringify(conversationData));
+      sessionStorage.setItem('quickCreateInput', inputMessage.trim());
+      if (response.conversationId || conversationId) {
+        sessionStorage.setItem('quickCreateConversationId', response.conversationId || conversationId || '');
+      }
     } catch (error: any) {
       console.error('Chat error:', error);
       const errorMessage: ChatMessage = {
@@ -455,7 +646,13 @@ Ask me questions to better understand my vision, then provide creative recommend
                     ))}
                   </div>
                 )}
-                <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                {message.structuredData ? (
+                  <div className="text-sm whitespace-pre-wrap leading-relaxed">
+                    {formatProjectDataAsText(message.structuredData)}
+                  </div>
+                ) : (
+                  <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                )}
                 {message.role === 'assistant' && message.showImport && (
                   <div className="mt-3 flex flex-wrap gap-2">
                     {message.structuredData && onImportProject ? (

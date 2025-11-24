@@ -26,6 +26,7 @@ export interface ProjectData {
   assets: ProjectAsset[];
   scenes: ProjectScene[];
   music: ProjectMusic;
+  sceneAssetMap?: { [sceneNumber: string]: number[] }; // Map of scene numbers (as strings) to asset numbers (1-based indices)
 }
 
 /**

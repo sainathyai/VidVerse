@@ -4,6 +4,97 @@ import { apiRequest } from '../lib/api';
 import { useAuth } from './auth/AuthProvider';
 import { extractProjectJSON, normalizeProjectData, validateProjectData } from '../lib/projectImport';
 
+/**
+ * Format structured project JSON data into readable plain text
+ */
+function formatProjectDataAsText(data: any): string {
+  if (!data) return '';
+  
+  let formatted = '';
+  
+  // Script
+  if (data.script) {
+    formatted += `📝 **SCRIPT**\n\n${data.script}\n\n`;
+  }
+  
+  // Global Style
+  if (data.globalStyle) {
+    formatted += `🎨 **VISUAL STYLE**\n`;
+    if (data.globalStyle.colorPalette) {
+      formatted += `Color Palette: ${data.globalStyle.colorPalette}\n`;
+    }
+    if (data.globalStyle.lighting) {
+      formatted += `Lighting: ${data.globalStyle.lighting}\n`;
+    }
+    if (data.globalStyle.cameraStyle) {
+      formatted += `Camera Style: ${data.globalStyle.cameraStyle}\n`;
+    }
+    if (data.globalStyle.visualAesthetic) {
+      formatted += `Visual Aesthetic: ${data.globalStyle.visualAesthetic}\n`;
+    }
+    formatted += '\n';
+  }
+  
+  // Assets
+  if (data.assets && data.assets.length > 0) {
+    formatted += `🖼️ **ASSETS** (${data.assets.length})\n\n`;
+    data.assets.forEach((asset: any, index: number) => {
+      formatted += `${index + 1}. ${asset.name || `Asset ${index + 1}`}\n`;
+      if (asset.category) {
+        formatted += `   Category: ${asset.category}\n`;
+      }
+      if (asset.prompt) {
+        formatted += `   Description: ${asset.prompt}\n`;
+      }
+      formatted += '\n';
+    });
+  }
+  
+  // Scenes
+  if (data.scenes && data.scenes.length > 0) {
+    formatted += `🎬 **SCENES** (${data.scenes.length})\n\n`;
+    data.scenes.forEach((scene: any) => {
+      formatted += `Scene ${scene.sceneNumber || '?'}\n`;
+      if (scene.prompt) {
+        formatted += `${scene.prompt}\n`;
+      }
+      if (scene.assetIds && scene.assetIds.length > 0) {
+        formatted += `Assets: ${scene.assetIds.join(', ')}\n`;
+      }
+      if (scene.transitionNotes) {
+        formatted += `Transition: ${scene.transitionNotes}\n`;
+      }
+      formatted += '\n';
+    });
+  }
+  
+  // Scene Asset Map
+  if (data.sceneAssetMap) {
+    formatted += `🔗 **SCENE-ASSET MAPPING**\n\n`;
+    Object.entries(data.sceneAssetMap).forEach(([sceneNum, assetNums]: [string, any]) => {
+      formatted += `Scene ${sceneNum}: Assets ${Array.isArray(assetNums) ? assetNums.join(', ') : assetNums}\n`;
+    });
+    formatted += '\n';
+  }
+  
+  // Music
+  if (data.music) {
+    formatted += `🎵 **MUSIC**\n\n`;
+    if (data.music.prompt) {
+      formatted += `Style: ${data.music.prompt}\n`;
+    }
+    if (data.music.duration) {
+      formatted += `Duration: ${data.music.duration} seconds\n`;
+    }
+    if (data.music.lyrics) {
+      formatted += `Lyrics/Description: ${data.music.lyrics}\n`;
+    }
+    formatted += '\n';
+  }
+  
+  return formatted.trim();
+}
+
 interface QuickCreateModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -25,6 +116,14 @@ export function QuickCreateModal({ isOpen, onClose, onImportProject, onNavigateT
   const [projectData, setProjectData] = useState<any>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { getAccessToken } = useAuth();
+
+  // Sync concept input with AIChatPanel via sessionStorage
+  useEffect(() => {
+    if (concept) {
+      sessionStorage.setItem('quickCreateInput', concept);
+      sessionStorage.setItem('quickCreateConversationId', conversationId || '');
+    }
+  }, [concept, conversationId]);
 
   useEffect(() => {
     if (isOpen && textareaRef.current) {
@@ -64,16 +163,21 @@ export function QuickCreateModal({ isOpen, onClose, onImportProject, onNavigateT
 
       if (response.response) {
         setAiResponse(response.response);
-        setConversationId(response.conversationId || null);
+        const newConversationId = response.conversationId || null;
+        setConversationId(newConversationId);
         
         // Try to extract project JSON from the response
+        let structuredProjectData: any = null;
+        let showImport = false;
         try {
           const extracted = extractProjectJSON(response.response);
           if (extracted) {
             const normalized = normalizeProjectData(extracted);
             if (validateProjectData(normalized)) {
+              structuredProjectData = normalized;
               setProjectData(normalized);
               setShowReview(true);
+              showImport = true;
             }
           }
         } catch (error) {
@@ -81,6 +185,46 @@ export function QuickCreateModal({ isOpen, onClose, onImportProject, onNavigateT
           // Still show the response even if JSON parsing fails
           setShowReview(true);
         }
+
+        // Check if response contains structured content or final keywords (for import button)
+        if (!showImport) {
+          const hasStructuredContent = /```|```[\w]*\n|#+\s|^\*\*|^\* /m.test(response.response);
+          const hasFinalKeywords = /(final|ready|here'?s (?:your|the)|complete|finished|done|generated|created|script|prompt|video description|here is|below is)/i.test(response.response);
+          showImport = hasStructuredContent || hasFinalKeywords;
+        }
+
+        // Sync conversation with AIChatPanel via sessionStorage
+        const assistantMessage: any = {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content: response.response,
+          timestamp: new Date().toISOString(),
+        };
+
+        // Add import-related properties if applicable
+        if (showImport) {
+          assistantMessage.showImport = true;
+          if (structuredProjectData) {
+            assistantMessage.structuredData = structuredProjectData;
+          }
+        }
+
+        const conversationData = {
+          messages: [
+            {
+              id: `user-${Date.now()}`,
+              role: 'user',
+              content: message,
+              timestamp: new Date().toISOString(),
+            },
+            assistantMessage,
+          ],
+          conversationId: newConversationId,
+          inputMessage: concept.trim(),
+        };
+        sessionStorage.setItem('quickCreateConversation', JSON.stringify(conversationData));
+        sessionStorage.setItem('quickCreateInput', concept.trim());
+        sessionStorage.setItem('quickCreateConversationId', newConversationId || '');
       }
     } catch (error: any) {
       console.error('Error generating project:', error);
@@ -107,6 +251,7 @@ export function QuickCreateModal({ isOpen, onClose, onImportProject, onNavigateT
     setShowReview(false);
     setProjectData(null);
     setConversationId(null);
+    // Don't clear sessionStorage - keep conversation for AIChatPanel
     onClose();
   };
 
@@ -153,7 +298,12 @@ export function QuickCreateModal({ isOpen, onClose, onImportProject, onNavigateT
                 <textarea
                   ref={textareaRef}
                   value={concept}
-                  onChange={(e) => setConcept(e.target.value)}
+                  onChange={(e) => {
+                    const newValue = e.target.value;
+                    setConcept(newValue);
+                    // Sync input in real-time to sessionStorage for AIChatPanel
+                    sessionStorage.setItem('quickCreateInput', newValue);
+                  }}
                   placeholder="E.g., A cinematic advertisement for luxury sunglasses featuring urban landscapes, modern aesthetics, and dynamic camera movements..."
                   className="w-full h-32 px-4 py-3 bg-black/40 backdrop-blur-sm border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500/60 focus:shadow-lg focus:shadow-blue-500/20 resize-none"
                   onKeyDown={(e) => {
@@ -184,7 +334,11 @@ export function QuickCreateModal({ isOpen, onClose, onImportProject, onNavigateT
 
               {aiResponse && !showReview && (
                 <div className="p-4 bg-gradient-to-br from-blue-500/10 via-purple-500/8 to-pink-500/5 backdrop-blur-sm border border-white/10 rounded-lg">
-                  <p className="text-sm text-white/80 whitespace-pre-wrap">{aiResponse}</p>
+                  {projectData ? (
+                    <p className="text-sm text-white/80 whitespace-pre-wrap">{formatProjectDataAsText(projectData)}</p>
+                  ) : (
+                    <p className="text-sm text-white/80 whitespace-pre-wrap">{aiResponse}</p>
+                  )}
                 </div>
               )}
             </div>

@@ -13,6 +13,7 @@ import { Sparkles, ArrowRight, Settings, ArrowLeft, Pencil, Check, X, RotateCcw,
 import { AIChatPanel } from "../components/AIChatPanel";
 import { LeftPanel } from "../components/SimpleCreate/LeftPanel";
 import { MiddleSection } from "../components/SimpleCreate/MiddleSection";
+import { extractProjectJSON, validateProjectData, normalizeProjectData } from "../lib/projectImport";
 
 const MAX_ANCHOR_ASSETS = 5;
 
@@ -25,12 +26,42 @@ type AnchorImage = {
   isTemporary?: boolean;
 };
 
+/**
+ * Renumbers anchor images while preserving slot-based numbering when possible.
+ * Asset numbers should always correspond to slot positions (slot 0 = asset 1, slot 1 = asset 2, etc.)
+ * 
+ * Strategy:
+ * 1. If assets already have correct slot-based numbering (assetNumber matches their intended slot), preserve it
+ * 2. If there are gaps (e.g., assets 1, 3, 5), fill them by shifting forward
+ * 3. Always ensure final array is sorted by assetNumber
+ */
 const renumberAnchorImages = (images: AnchorImage[]): AnchorImage[] => {
-  return images
+  if (images.length === 0) return [];
+  
+  // Sort by current assetNumber to maintain order
+  const sorted = [...images].sort((a, b) => a.assetNumber - b.assetNumber);
+  
+  // Check if assets are already in correct sequential order without gaps
+  let hasGaps = false;
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i].assetNumber !== i + 1) {
+      hasGaps = true;
+      break;
+    }
+  }
+  
+  // If no gaps and numbers are sequential starting from 1, return as-is
+  if (!hasGaps && sorted.length > 0 && sorted[0].assetNumber === 1) {
+    return sorted.slice(0, MAX_ANCHOR_ASSETS);
+  }
+  
+  // Otherwise, renumber sequentially to fill gaps
+  // This preserves the relative order but ensures sequential numbering
+  return sorted
     .slice(0, MAX_ANCHOR_ASSETS)
     .map((image, index) => ({
       ...image,
-      assetNumber: index + 1,
+      assetNumber: index + 1, // Sequential numbering starting from 1
     }));
 };
 
@@ -97,6 +128,7 @@ function SimpleCreateContent() {
     lastFrameUrl?: string;
     extendPrevious: boolean;
     selectedAssetIds: string[];
+    selectedAssetNumbers?: number[]; // Store asset numbers for checkbox checking before assets are generated
     isGenerating: boolean;
   }
   const [scenes, setScenes] = useState<Scene[]>([
@@ -1835,7 +1867,34 @@ function SimpleCreateContent() {
         setGeneratedAnchorImages(prev => {
           // Filter out old assets that were replaced and add new ones
           const filtered = prev.filter(img => !assetNumbersToReplace.has(img.assetNumber));
-          const updated = renumberAnchorImages([...filtered, ...newImages]);
+          
+          // Sort newImages by assetNumber to ensure correct slot order
+          const sortedNewImages = [...newImages].sort((a, b) => a.assetNumber - b.assetNumber);
+          
+          // Merge filtered and new images, ensuring they're in the correct slot order
+          // Create a map to efficiently merge by assetNumber
+          const assetMap = new Map<number, AnchorImage>();
+          
+          // Add existing assets (not being replaced)
+          filtered.forEach(img => {
+            assetMap.set(img.assetNumber, img);
+          });
+          
+          // Add/Replace with new images (sorted by assetNumber)
+          sortedNewImages.forEach(img => {
+            assetMap.set(img.assetNumber, img);
+          });
+          
+          // Convert map to array, sorted by assetNumber to maintain slot sequence
+          // This ensures assets are in the correct slot order regardless of completion order
+          // Each asset already has the correct assetNumber based on its original slot index (result.index + 1)
+          // So slot 0 → assetNumber 1, slot 1 → assetNumber 2, etc.
+          const merged = Array.from(assetMap.values()).sort((a, b) => a.assetNumber - b.assetNumber);
+          
+          // renumberAnchorImages will preserve slot-based numbering if assets are already sequential
+          // It only renumbers to fill gaps (e.g., if asset 2 was removed, asset 3 becomes asset 2)
+          // This ensures consistency: asset numbers always correspond to slot positions
+          const updated = renumberAnchorImages(merged);
           
           // Convert placeholder slot IDs in scenes to actual asset IDs
           setScenes(currentScenes => {
@@ -2390,6 +2449,7 @@ function SimpleCreateContent() {
     assets?: Array<{ name: string; prompt: string }>;
     scenes?: Array<{ sceneNumber: number; prompt: string; assetIds: string[] }>;
     music?: { lyrics?: string; prompt?: string; bitrate?: string; sample_rate?: string; audio_format?: string };
+    sceneAssetMap?: { [sceneNumber: string]: number[] }; // Map of scene numbers to asset numbers (1-based)
   }) => {
     try {
       // Import assets (limit to 5)
@@ -2400,52 +2460,101 @@ function SimpleCreateContent() {
           assetPrompts.push('');
         }
         setAnchorImagePrompts(assetPrompts);
-        console.log(`Imported ${assetPrompts.filter(p => p).length} asset prompts`);
+        console.log(`[Import] Imported ${assetPrompts.filter(p => p).length} asset prompts`);
+        console.log(`[Import] Asset prompts:`, assetPrompts.map((p, i) => ({ slot: i, prompt: p.substring(0, 50) + '...' })));
       }
 
-      // Import scenes
+      // Import scenes - merge with existing scenes to preserve video URLs
       if (projectData.scenes && projectData.scenes.length > 0) {
-        // Create a map from asset names to their slot indices (0-based)
-        // These will be used to map to actual asset IDs after assets are generated
-        const assetNameToSlotIndex = new Map<string, number>();
-        if (projectData.assets) {
-          projectData.assets.forEach((asset, index) => {
-            assetNameToSlotIndex.set(asset.name, index);
+        setScenes(currentScenes => {
+          const importedScenesData = projectData.scenes!
+            .sort((a, b) => a.sceneNumber - b.sceneNumber);
+          
+          // Create a map of existing scenes by their index/ID to preserve URLs
+          const existingScenesMap = new Map<string, Scene>();
+          currentScenes.forEach((scene, idx) => {
+            // Try to match by scene number if IDs match pattern, otherwise by index
+            const sceneNum = scene.id.match(/scene-(\d+)/)?.[1];
+            if (sceneNum) {
+              existingScenesMap.set(sceneNum, scene);
+            }
+            existingScenesMap.set(idx.toString(), scene);
           });
-        }
+          
+          const mergedScenes: Scene[] = importedScenesData.map((scene, index) => {
+            // Find existing scene to preserve URLs
+            const existingScene = existingScenesMap.get(scene.sceneNumber.toString()) || 
+                                 existingScenesMap.get(index.toString()) ||
+                                 currentScenes[index];
+            
+            // Use sceneAssetMap as the source of truth - convert asset names/numbers to asset numbers (1-based)
+            let selectedAssetNumbers: number[] = [];
+            
+            // Create a map from asset names to their position in the assets array (1-based)
+            const assetNameToIndex = new Map<string, number>();
+            if (projectData.assets) {
+              projectData.assets.forEach((asset, idx) => {
+                assetNameToIndex.set(asset.name, idx + 1); // 1-based asset number
+              });
+            }
+            
+            if (projectData.sceneAssetMap && projectData.sceneAssetMap[scene.sceneNumber.toString()]) {
+              // sceneAssetMap may contain asset names (strings) or numbers - convert to numbers
+              const sceneAssets = projectData.sceneAssetMap[scene.sceneNumber.toString()];
+              selectedAssetNumbers = sceneAssets
+                .map((item: string | number) => {
+                  // If it's already a number, use it directly (1-based)
+                  if (typeof item === 'number') {
+                    return item;
+                  }
+                  // If it's a string (asset name), look it up in the assets array
+                  return assetNameToIndex.get(item);
+                })
+                .filter((num): num is number => num !== undefined && num !== null);
+              console.log(`[Import] Scene ${scene.sceneNumber}: Using sceneAssetMap - converted to asset numbers:`, selectedAssetNumbers);
+            } else if (scene.assetIds && scene.assetIds.length > 0 && projectData.assets) {
+              // Fallback: derive asset numbers from assetIds (asset names)
+              selectedAssetNumbers = scene.assetIds
+                .map(assetName => assetNameToIndex.get(assetName))
+                .filter((num): num is number => num !== undefined);
+              console.log(`[Import] Scene ${scene.sceneNumber}: Derived asset numbers from assetIds:`, selectedAssetNumbers);
+            }
 
-        const importedScenes: Scene[] = projectData.scenes
-          .sort((a, b) => a.sceneNumber - b.sceneNumber)
-          .map((scene, index) => {
-            // Map asset names to slot indices
-            // Note: We'll need to map these to actual asset IDs after assets are generated
-            // For now, we store them as placeholder IDs that match the slot index
-            // The actual mapping will happen when assets are generated and we can match by assetNumber
-            const mappedAssetSlotIndices = (scene.assetIds || [])
-              .map(assetName => {
-                const slotIndex = assetNameToSlotIndex.get(assetName);
-                return slotIndex !== undefined ? slotIndex : null;
-              })
-              .filter((idx): idx is number => idx !== null);
+            // Convert asset numbers to actual asset IDs if assets already exist (for backend compatibility)
+            let finalSelectedAssetIds: string[] = existingScene?.selectedAssetIds || [];
+            if (selectedAssetNumbers.length > 0 && generatedAnchorImages.length > 0) {
+              // Assets exist - convert asset numbers to IDs for backend
+              finalSelectedAssetIds = selectedAssetNumbers
+                .map(assetNum => {
+                  const matchingAsset = generatedAnchorImages.find(img => img.assetNumber === assetNum);
+                  return matchingAsset ? matchingAsset.id : null;
+                })
+                .filter((id): id is string => id !== null);
+            }
 
-            // Store slot indices temporarily - we'll map to actual IDs after assets are generated
-            // Use a special format: "slot-{index}" that we can identify and convert later
-            const placeholderIds = mappedAssetSlotIndices.map(idx => `slot-${idx}`);
-
+            // Merge imported data with existing scene, preserving URLs
             return {
-              id: `scene-${scene.sceneNumber}`,
-              prompt: scene.prompt,
-              extendPrevious: index > 0, // First scene doesn't extend previous
-              selectedAssetIds: placeholderIds, // Will be converted to actual IDs after asset generation
-              isGenerating: false,
+              ...existingScene, // Preserve existing properties (videoUrl, firstFrameUrl, lastFrameUrl, etc.)
+              id: existingScene?.id || `scene-${scene.sceneNumber}`, // Keep existing ID if available
+              prompt: scene.prompt, // Update prompt from import
+              extendPrevious: existingScene?.extendPrevious ?? (index > 0), // Preserve or set default
+              selectedAssetIds: finalSelectedAssetIds, // Asset IDs for backend (if assets exist)
+              selectedAssetNumbers: selectedAssetNumbers.length > 0 ? selectedAssetNumbers : undefined, // Asset numbers from script - source of truth for checkboxes
+              isGenerating: existingScene?.isGenerating ?? false, // Preserve generating state
             };
           });
-        
-        setScenes(importedScenes);
-        console.log(`Imported ${importedScenes.length} scenes with asset slot mappings (will convert to IDs after assets are generated)`);
-        
-        // Set up a useEffect to convert slot indices to actual asset IDs when assets are generated
-        // This will be handled by checking if any selectedAssetIds start with "slot-" and converting them
+          
+          console.log(`[Import] Merged ${mergedScenes.length} scenes - preserved existing URLs, updated prompts and asset selections`);
+          console.log(`[Import] Scene asset mappings (from script/sceneAssetMap):`, mergedScenes.map(s => ({ 
+            sceneId: s.id, 
+            selectedAssetNumbers: s.selectedAssetNumbers, // Source of truth from script
+            selectedAssetIds: s.selectedAssetIds, // For backend compatibility
+            hasVideoUrl: !!s.videoUrl 
+          })));
+          console.log(`[Import] Current generated assets:`, generatedAnchorImages.map(a => ({ id: a.id, assetNumber: a.assetNumber })));
+          
+          return mergedScenes;
+        });
       }
 
       // Import music prompt as JSON string
@@ -2465,7 +2574,190 @@ function SimpleCreateContent() {
       console.error('Error importing project data:', error);
       alert(`Failed to import project data: ${error.message}`);
     }
-  }, []);
+  }, [generatedAnchorImages]);
+
+  // Handler to populate scenes - enable checkboxes based on sceneAssetMap
+  const handlePopulateScenes = useCallback(() => {
+    try {
+      // Check sessionStorage for conversation data
+      const quickCreateConversation = sessionStorage.getItem('quickCreateConversation');
+      if (!quickCreateConversation) {
+        alert('No project data found. Please generate a script in the AI chat first.');
+        return;
+      }
+
+      const conversationData = JSON.parse(quickCreateConversation);
+      if (!conversationData.messages || !Array.isArray(conversationData.messages)) {
+        alert('No valid conversation data found.');
+        return;
+      }
+
+      // Find the last assistant message with structured data
+      let structuredData: any = null;
+      for (let i = conversationData.messages.length - 1; i >= 0; i--) {
+        const msg = conversationData.messages[i];
+        if (msg.role === 'assistant' && msg.structuredData) {
+          structuredData = msg.structuredData;
+          break;
+        }
+        // Also try to extract from content if structuredData is not present
+        if (msg.role === 'assistant' && msg.content) {
+          try {
+            const extracted = extractProjectJSON(msg.content);
+            if (extracted && validateProjectData(extracted)) {
+              structuredData = normalizeProjectData(extracted);
+              break;
+            }
+          } catch (error) {
+            // Continue searching
+          }
+        }
+      }
+
+      if (!structuredData || !structuredData.sceneAssetMap) {
+        alert('No scene asset mapping found. Please generate a script with scene asset mapping in the AI chat first.');
+        return;
+      }
+
+      const sceneAssetMap = structuredData.sceneAssetMap;
+      
+      // Create a map from asset names to their position in the assets array (1-based)
+      const assetNameToIndex = new Map<string, number>();
+      if (structuredData.assets) {
+        structuredData.assets.forEach((asset: any, idx: number) => {
+          assetNameToIndex.set(asset.name, idx + 1); // 1-based asset number
+        });
+      }
+
+      // Update scenes with asset numbers from sceneAssetMap
+      setScenes(currentScenes => {
+        return currentScenes.map((scene) => {
+          // Extract scene number from scene ID (e.g., "scene-1" -> 1)
+          const sceneNumMatch = scene.id.match(/scene-(\d+)/);
+          const sceneNumber = sceneNumMatch ? sceneNumMatch[1] : null;
+          
+          if (!sceneNumber || !sceneAssetMap[sceneNumber]) {
+            return scene; // No mapping for this scene, keep as is
+          }
+
+          // Get asset numbers for this scene from sceneAssetMap
+          const sceneAssets = sceneAssetMap[sceneNumber];
+          const selectedAssetNumbers = sceneAssets
+            .map((item: string | number): number | undefined => {
+              // If it's already a number, use it directly (1-based)
+              if (typeof item === 'number') {
+                return item;
+              }
+              // If it's a string (asset name), look it up in the assets array
+              return assetNameToIndex.get(item);
+            })
+            .filter((num: number | undefined): num is number => num !== undefined && num !== null);
+
+          // Convert asset numbers to asset IDs if assets already exist
+          let selectedAssetIds = scene.selectedAssetIds || [];
+          if (selectedAssetNumbers.length > 0 && generatedAnchorImages.length > 0) {
+            selectedAssetIds = selectedAssetNumbers
+              .map((assetNum: number): string | null => {
+                const matchingAsset = generatedAnchorImages.find(img => img.assetNumber === assetNum);
+                return matchingAsset ? matchingAsset.id : null;
+              })
+              .filter((id: string | null): id is string => id !== null);
+          }
+
+          return {
+            ...scene,
+            selectedAssetNumbers: selectedAssetNumbers.length > 0 ? selectedAssetNumbers : undefined,
+            selectedAssetIds: selectedAssetIds.length > 0 ? selectedAssetIds : scene.selectedAssetIds,
+          };
+        });
+      });
+
+      alert(`Successfully populated asset checkboxes for ${Object.keys(sceneAssetMap).length} scenes based on scene asset mapping!`);
+    } catch (error: any) {
+      console.error('Error populating scenes:', error);
+      alert(`Failed to populate scenes: ${error.message}`);
+    }
+  }, [generatedAnchorImages]);
+
+  // Convert slot placeholders to actual asset IDs when assets are generated/loaded
+  // This ensures checkboxes are automatically checked when importing projects
+  useEffect(() => {
+    if (generatedAnchorImages.length === 0) return;
+    
+    setScenes(currentScenes => {
+      let hasChanges = false;
+      const updatedScenes = currentScenes.map(scene => {
+        const hasPlaceholders = scene.selectedAssetIds.some(id => id.startsWith('slot-'));
+        if (!hasPlaceholders) return scene; // No placeholders to convert
+        
+        hasChanges = true;
+        const updatedSelectedIds = scene.selectedAssetIds
+          .map(id => {
+            // Check if this is a placeholder slot ID (format: "slot-{index}")
+            if (id.startsWith('slot-')) {
+              const slotIndex = parseInt(id.replace('slot-', ''), 10);
+              // Find the asset at this slot index (assetNumber = slotIndex + 1, which is 1-based)
+              // slot-0 should match assetNumber 1, slot-1 should match assetNumber 2, etc.
+              const matchingAsset = generatedAnchorImages.find(img => img.assetNumber === slotIndex + 1);
+              if (matchingAsset) {
+                console.log(`[Import] Converting slot-${slotIndex} (Asset ${slotIndex + 1}) to asset ID ${matchingAsset.id}`);
+                return matchingAsset.id;
+              } else {
+                console.log(`[Import] No asset found for slot-${slotIndex} (Asset ${slotIndex + 1}). Available assets:`, generatedAnchorImages.map(a => `Asset ${a.assetNumber} (ID: ${a.id})`));
+              }
+              return id; // Keep placeholder if asset not found yet
+            }
+            return id; // Already a real ID
+          })
+          .filter(id => {
+            // Remove placeholders that don't have matching assets yet, but keep real IDs
+            if (id.startsWith('slot-')) {
+              const slotIndex = parseInt(id.replace('slot-', ''), 10);
+              const hasMatchingAsset = generatedAnchorImages.some(img => img.assetNumber === slotIndex + 1);
+              if (!hasMatchingAsset) {
+                console.log(`[Import] Removing placeholder slot-${slotIndex} - no matching asset found`);
+              }
+              return hasMatchingAsset;
+            }
+            return true; // Keep all real IDs
+          });
+        
+        if (updatedSelectedIds.length > 0 && updatedSelectedIds.some(id => !id.startsWith('slot-'))) {
+          console.log(`[Import] Scene ${scene.id} updated: ${scene.selectedAssetIds.length} -> ${updatedSelectedIds.length} asset IDs:`, updatedSelectedIds);
+        }
+        
+        // Also convert selectedAssetNumbers to actual IDs if they exist
+        let finalSelectedIds = updatedSelectedIds;
+        if (scene.selectedAssetNumbers && scene.selectedAssetNumbers.length > 0) {
+          const assetIdsFromNumbers = scene.selectedAssetNumbers
+            .map(assetNum => {
+              const matchingAsset = generatedAnchorImages.find(img => img.assetNumber === assetNum);
+              return matchingAsset ? matchingAsset.id : null;
+            })
+            .filter((id): id is string => id !== null);
+          
+          // Merge with existing IDs, avoiding duplicates
+          assetIdsFromNumbers.forEach(assetId => {
+            if (!finalSelectedIds.includes(assetId)) {
+              finalSelectedIds.push(assetId);
+            }
+          });
+        }
+        
+        return {
+          ...scene,
+          selectedAssetIds: finalSelectedIds,
+          selectedAssetNumbers: undefined, // Clear asset numbers once we have actual IDs
+        };
+      });
+      
+      if (hasChanges) {
+        console.log(`[Import] Updated ${updatedScenes.filter((s, i) => s.selectedAssetIds !== currentScenes[i]?.selectedAssetIds).length} scenes with asset IDs`);
+      }
+      
+      return hasChanges ? updatedScenes : currentScenes;
+    });
+  }, [generatedAnchorImages]);
 
   // Check for quick create import data on mount - ONLY for new projects (no projectIdFromUrl)
   useEffect(() => {
@@ -2602,6 +2894,7 @@ function SimpleCreateContent() {
           onGenerateMusic={handleGenerateMusic}
           finalVideoUrl={finalVideoUrl}
           onUploadAsset={handleUploadAsset}
+          onPopulateScenes={handlePopulateScenes}
         />
 
         {/* Right Panel - Reserved for future features */}
